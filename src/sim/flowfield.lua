@@ -48,12 +48,17 @@ local function pop()
   return top
 end
 
+local OCC_WALL, OCC_BUILD = Grid.OCC_WALL, Grid.OCC_BUILD
+
+local function solid(v)
+  return v == OCC_WALL or v == OCC_BUILD
+end
+
 local function cornerBlocked(gx, gy, k)
   local ox = nbDx[k]
   local oy = nbDy[k]
-  local occ = Grid.occupancy
-  if Grid.occAtTile(gx + ox, gy) == Grid.OCC_WALL then return true end
-  if Grid.occAtTile(gx, gy + oy) == Grid.OCC_WALL then return true end
+  if solid(Grid.occAtTile(gx + ox, gy)) then return true end
+  if solid(Grid.occAtTile(gx, gy + oy)) then return true end
   return false
 end
 
@@ -81,7 +86,7 @@ function Flow.rebake(sources)
         if not (nbDiag[k] and cornerBlocked(cgx, cgy, k)) then
           local nc = ny * W + nx + 1
           local cost = nbDiag[k] and 1.42 or 1
-          if occ[nc] == Grid.OCC_WALL then cost = cost + WALL_COST end
+          if solid(occ[nc]) then cost = cost + WALL_COST end
           local nd = dc + cost
           if nd < dist[nc] then
             dist[nc] = nd
@@ -100,7 +105,7 @@ function Flow.computeDirections()
   local fx, fy = Flow.flowX, Flow.flowY
   local occ = Grid.occupancy
   for c = 1, N do
-    if occ[c] == Grid.OCC_WALL or dist[c] == INF then
+    if solid(occ[c]) or dist[c] == INF then
       fx[c] = 0
       fy[c] = 0
     else

@@ -2,6 +2,8 @@ local State = require("src.core.state")
 local Camera = require("src.core.camera")
 local Grid = require("src.sim.grid")
 local Enemies = require("src.sim.enemies")
+local Villagers = require("src.sim.villagers")
+local Buildings = require("src.sim.buildings")
 
 local FIXED_DT = 1 / 60
 
@@ -31,7 +33,10 @@ end
 
 function love.keypressed(key)
   if key == "escape" then
-    if State.buildMode then
+    if State.selection then
+      State.selection = nil
+      State.follow = false
+    elseif State.buildMode then
       State.buildMode = false
     else
       love.event.quit()
@@ -42,6 +47,10 @@ function love.keypressed(key)
     State.setBuildType("wall")
   elseif key == "2" and State.mode == "playing" then
     State.setBuildType("arrow_tower")
+  elseif key == "3" and State.mode == "playing" then
+    State.setBuildType("ballista")
+  elseif key == "4" and State.mode == "playing" then
+    State.setBuildType("house")
   elseif key == "b" and State.mode == "playing" then
     State.buildMode = not State.buildMode
   elseif key == "space" then
@@ -73,9 +82,33 @@ end
 function love.mousepressed(x, y, button)
   if button == 1 then
     if State.handleClick(x, y) then return end
-    if State.buildMode then State.tryPlace(x, y) end
+    if State.buildMode then
+      State.tryPlace(x, y)
+      return
+    end
+    if State.mode ~= "playing" then return end
+    local wx, wy = Camera.toWorld(x, y)
+    local gx, gy = Grid.worldToTile(wx, wy)
+    local sel
+    for _, v in ipairs(Villagers.list) do
+      if not v.dead then
+        local dx, dy = v.x - wx, v.y - wy
+        if dx * dx + dy * dy < 144 then sel = { villager = v }; break end
+      end
+    end
+    if not sel then
+      local b = Buildings.at(gx, gy)
+      if b > 0 then sel = { building = b } end
+    end
+    State.selection = sel
+    State.follow = sel ~= nil and sel.villager ~= nil
   elseif button == 2 then
-    State.buildMode = false
+    if State.selection then
+      State.selection = nil
+      State.follow = false
+    else
+      State.buildMode = false
+    end
   end
 end
 

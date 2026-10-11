@@ -87,22 +87,34 @@ All tunables are plain Lua tables in `src/data/`:
 - Sim step at 10k enemies is ~23ms (JIT): potential future wins — 30Hz enemy updates with 60Hz towers/projectiles, flow-field sampling every other step, moving enemy sim to FFI/native if ever needed.
 - Wave 1 balance unchanged from M1 (resource gating arrives in M3).
 
-### M3 — Village sim: villagers, resources, staffed defenses
+### M3 — Village sim: villagers, resources, staffed defenses ✅ DONE
 
-- [ ] Villager entities: 2 starting families, man/woman, needs (food), death
-- [ ] Resources: wood, food, stone — gatherable nodes (trees, bushes/berries, rocks)
-- [ ] Resource stockpile + costs on all buildings
-- [ ] Buildings: house, wall, arrow tower, ballista (crew slots defined in data)
-- [ ] Menu-based villager management:
+- [x] Villager entities: 2 starting families, man/woman, needs (food), death
+- [x] Resources: wood, food, stone — gatherable nodes (trees, bushes/berries, rocks)
+- [x] Resource stockpile + costs on all buildings
+- [x] Buildings: house, wall, arrow tower, ballista (crew slots defined in data)
+- [x] Menu-based villager management:
   - click villager → job menu (Idle / Gather wood / Gather food / Gather stone / Build / Crew tower)
   - click defense → panel with crew slots → Assign / Unassign servant
-- [ ] Crew logistics: assigned villager walks to the tower; tower only fires once staffed
-- [ ] Crew deaths mid-wave → tower goes offline until re-staffed
-- [ ] Housing: population capped by houses; villagers sleep at home
-- [ ] Food consumption loop (farms/berries → stockpile → feeding)
-- [ ] AoE-style camera polish: follow selection, hover tooltips
+- [x] Crew logistics: assigned villager walks to the tower; tower only fires once staffed
+- [x] Crew deaths mid-wave → tower goes offline until re-staffed (enemies attack villagers in melee range before walls/heart)
+- [x] Housing: population capped by houses (heart base 4, +2/house); idle villagers loiter near home area (no day/night sleep cycle yet)
+- [x] Food consumption loop (berries → stockpile → feeding; berries regrow; starvation drains hp → death)
+- [x] AoE-style camera polish: camera soft-follows a selected villager (WASD pan cancels), hover tooltips for villagers/buildings/nodes
 
-**Acceptance**: gather → build → staff towers → survive waves where unstaffed towers do nothing.
+**Acceptance**: gather → build → staff towers → survive waves where unstaffed towers do nothing. ✅ Verified headless (21 checks) + all four harnesses pass.
+
+Implementation notes:
+- New modules: `src/sim/buildings.lua` (registry: construction, hp, crew, swap-remove), `src/sim/villagers.lua` (job state machine), `src/sim/nodes.lua` (scatter + regen). Data: `buildings.lua` (costs/buildTime/crew/popCap), `villagers.lua`, `resources.lua`, `nodes.lua`.
+- Towers fire only when `built && crewCount >= crew` (`src/sim/towers.lua` now iterates the Buildings registry).
+- Buildings occupy their tile (`OCC_BUILD`) — block enemies and the flow field (same +60 wall cost); enemies bash them when blocked.
+- Costs are deducted at placement; walls build instantly (palisade), towers/houses/ballista need a builder (Build job).
+- **Known M3 caveats**: villagers walk in straight lines and pass through walls (placeholder — outbound pathing arrives later); enemies ignore villagers unless in melee range while attacking/blocked; no enemy targeting of villagers at range; sleeping is cosmetic idling.
+
+**Known M2 caveats (partially addressed)**
+
+- ~~Wave 1 balance unchanged from M1 (resource gating arrives in M3)~~ — M3 gates all builds behind gatherable resources.
+- Fixed latent harness bug found during M3 testing: after a harness finished it nil'd its frame counter and `State.update` compared `nil <= 0` (crashed after the summary print).
 
 ### M4 — Data-driven waves
 
@@ -154,20 +166,22 @@ All tunables are plain Lua tables in `src/data/`:
 
 ## Current State
 
-- **Done**: M1 (core loop) + M2 (perf foundation: flow fields, walls, SoA enemies, SpriteBatch, stress harness).
-- **Next up**: M3 — villagers, resources, menu-based job/crew assignment, staffed defenses.
+- **Done**: M1 (core loop) + M2 (perf foundation: flow fields, walls, SoA enemies, SpriteBatch, stress harness) + M3 (village sim: villagers, jobs, resources, staffed defenses, hunger).
+- **Next up**: M4 — data-driven waves (mixed enemy types, per-wave budgets, spawn scheduling, wave preview).
 - Test commands: `./run.sh --smoke`, `./run.sh --stress`, `./run.sh --stress2`, `./run.sh --test` (flag files are gitignored).
 
-## Controls (M2)
+## Controls (M3)
 
 | Input | Action |
 |---|---|
-| `1` / `2` | Build wall / build arrow tower |
+| `1` / `2` / `3` / `4` | Build wall / arrow tower / ballista / house |
 | `B` | Toggle build mode (current type) |
-| Left click | Place building / UI buttons |
-| Right click / `Esc` | Cancel build mode (Esc quits if not building) |
+| Left click villager | Select → job menu (Idle / Wood / Food / Stone / Build); camera follows |
+| Left click defense | Select → crew panel (Assign / Unassign servant) |
+| Left click ground | Deselect |
+| Right click / `Esc` | Close panel → cancel build mode (Esc quits if neither) |
 | `Space` | Skip countdown |
-| WASD / arrows | Pan camera |
+| WASD / arrows | Pan camera (cancels follow) |
 | Mouse wheel | Zoom |
 | `F3` | Debug overlay |
 | `K` / `Shift+K` | Spawn 1k / 10k enemies (debug) |

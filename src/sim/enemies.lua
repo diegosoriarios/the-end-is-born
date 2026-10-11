@@ -2,6 +2,8 @@ local enemyData = require("src.data.enemies")
 local Grid = require("src.sim.grid")
 local Flow = require("src.sim.flowfield")
 local Walls = require("src.sim.walls")
+local Buildings = require("src.sim.buildings")
+local Villagers = require("src.sim.villagers")
 
 local floor = math.floor
 local sqrt = math.sqrt
@@ -9,6 +11,7 @@ local sqrt = math.sqrt
 local W, H = Grid.WIDTH, Grid.HEIGHT
 local INV_TILE = 1 / Grid.TILE
 local OCC_WALL = Grid.OCC_WALL
+local OCC_BUILD = Grid.OCC_BUILD
 
 local Enemies = {
   n = 0,
@@ -119,6 +122,41 @@ local function wallAdjacent(i)
   return best
 end
 
+local function buildingAdjacent(i)
+  local E = Enemies
+  local T = Grid.TILE
+  local gx = floor((E.x[i] + E.hx[i] * 2) / T)
+  local gy = floor((E.y[i] + E.hy[i] * 2) / T)
+  local b = Buildings.at(gx, gy)
+  if b > 0 then return b end
+  for k = 0, 3 do
+    local ox = (k == 0 and 1) or (k == 1 and -1) or 0
+    local oy = (k == 2 and 1) or (k == 3 and -1) or 0
+    b = Buildings.at(gx + ox, gy + oy)
+    if b > 0 then return b end
+  end
+  return 0
+end
+
+local pvX, pvY, pvRange = 0, 0, 0
+local function villagerNear(ctx)
+  local list = ctx.villagers.list
+  local best, bd = nil, pvRange * pvRange
+  for k = 1, #list do
+    local v = list[k]
+    if not v.dead then
+      local dx = v.x - pvX
+      local dy = v.y - pvY
+      local d2 = dx * dx + dy * dy
+      if d2 < bd then
+        bd = d2
+        best = v
+      end
+    end
+  end
+  return best
+end
+
 local function update(dt, ctx)
   local E = Enemies
   local v = ctx.village
@@ -140,7 +178,14 @@ local function update(dt, ctx)
       E.attackTimer[i] = E.attackTimer[i] - dt
       if E.attackTimer[i] <= 0 then
         E.attackTimer[i] = attackInterval[E.kind[i]]
-        v.hp = math.max(0, v.hp - E.dmg[i])
+        pvX, pvY = xi, yi
+        pvRange = E.r[i] + 12
+        local pv = villagerNear(ctx)
+        if pv then
+          Villagers.damage(pv, E.dmg[i])
+        else
+          v.hp = math.max(0, v.hp - E.dmg[i])
+        end
       end
     else
       local sx, sy = 0, 0
@@ -209,7 +254,9 @@ local function update(dt, ctx)
       local nx = xi + nhx * sp
       local ngx = floor(nx * INV_TILE)
       local ngy = floor(yi * INV_TILE)
-      if ngx < 0 or ngy < 0 or ngx >= W or ngy >= H or occ[ngy * W + ngx + 1] == OCC_WALL then
+      local oc = ngx < 0 or ngy < 0 or ngx >= W or ngy >= H
+      if not oc then oc = occ[ngy * W + ngx + 1] == OCC_WALL or occ[ngy * W + ngx + 1] == OCC_BUILD end
+      if oc then
         nx = xi
         blocked = true
       end
@@ -217,7 +264,9 @@ local function update(dt, ctx)
       local ny = E.y[i] + nhy * sp
       ngx = floor(E.x[i] * INV_TILE)
       ngy = floor(ny * INV_TILE)
-      if ngx < 0 or ngy < 0 or ngx >= W or ngy >= H or occ[ngy * W + ngx + 1] == OCC_WALL then
+      oc = ngx < 0 or ngy < 0 or ngx >= W or ngy >= H
+      if not oc then oc = occ[ngy * W + ngx + 1] == OCC_WALL or occ[ngy * W + ngx + 1] == OCC_BUILD end
+      if oc then
         ny = E.y[i]
         blocked = true
       end
@@ -226,10 +275,24 @@ local function update(dt, ctx)
       if blocked then
         E.attackTimer[i] = E.attackTimer[i] - dt
         if E.attackTimer[i] <= 0 then
-          local w = wallAdjacent(i)
-          if w > 0 then
+          pvX, pvY = xi, yi
+          pvRange = E.r[i] + 12
+          local pv = villagerNear(ctx)
+          if pv then
             E.attackTimer[i] = attackInterval[E.kind[i]]
-            Walls.damage(w, E.dmg[i])
+            Villagers.damage(pv, E.dmg[i])
+          else
+            local w = wallAdjacent(i)
+            if w > 0 then
+              E.attackTimer[i] = attackInterval[E.kind[i]]
+              Walls.damage(w, E.dmg[i])
+            else
+              local b = buildingAdjacent(i)
+              if b > 0 then
+                E.attackTimer[i] = attackInterval[E.kind[i]]
+                Buildings.damage(b, E.dmg[i])
+              end
+            end
           end
         end
       end

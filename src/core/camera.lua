@@ -43,11 +43,13 @@ end
 
 function Camera.updateKeyboard(dt)
   local speed = 500 / Camera.zoom
-  if love.keyboard.isDown("w", "up") then Camera.y = Camera.y - speed * dt end
-  if love.keyboard.isDown("s", "down") then Camera.y = Camera.y + speed * dt end
-  if love.keyboard.isDown("a", "left") then Camera.x = Camera.x - speed * dt end
-  if love.keyboard.isDown("d", "right") then Camera.x = Camera.x + speed * dt end
+  local panned = false
+  if love.keyboard.isDown("w", "up") then Camera.y = Camera.y - speed * dt; panned = true end
+  if love.keyboard.isDown("s", "down") then Camera.y = Camera.y + speed * dt; panned = true end
+  if love.keyboard.isDown("a", "left") then Camera.x = Camera.x - speed * dt; panned = true end
+  if love.keyboard.isDown("d", "right") then Camera.x = Camera.x + speed * dt; panned = true end
   Camera.clamp()
+  return panned
 end
 
 function Camera.apply()

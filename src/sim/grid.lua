@@ -3,6 +3,7 @@ local Grid = { TILE = 32, WIDTH = 64, HEIGHT = 64, EDGE_MARGIN = 2 }
 Grid.OCC_NONE = 0
 Grid.OCC_WALL = 1
 Grid.OCC_VILLAGE = 2
+Grid.OCC_BUILD = 3
 
 function Grid.resetOccupancy()
   local occ = Grid.occupancy

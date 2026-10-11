@@ -1,28 +1,20 @@
 local buildingData = require("src.data.buildings")
-local Grid = require("src.sim.grid")
+local Buildings = require("src.sim.buildings")
 local Enemies = require("src.sim.enemies")
 
-local Towers = { list = {}, shots = 0 }
+local Towers = { shots = 0 }
 
 function Towers.clear()
-  Towers.list = {}
   Towers.shots = 0
 end
 
 function Towers.canPlace(gx, gy, village)
-  if not Grid.inBounds(gx, gy) then return false end
-  if Grid.occAtTile(gx, gy) ~= Grid.OCC_NONE then return false end
-  local wx, wy = Grid.tileToWorld(gx, gy)
-  local dx, dy = wx - village.x, wy - village.y
-  local minDist = village.r + Grid.TILE * 0.75
-  return dx * dx + dy * dy > minDist * minDist
+  return Buildings.canPlace(gx, gy, village)
 end
 
-function Towers.place(gx, gy)
-  local wx, wy = Grid.tileToWorld(gx, gy)
-  local tower = { gx = gx, gy = gy, x = wx, y = wy, kind = "arrow_tower", cooldown = 0 }
-  Towers.list[#Towers.list + 1] = tower
-  return tower
+-- Instant-build helper for test harnesses (skips cost + construction).
+function Towers.place(gx, gy, kind)
+  return Buildings.place(gx, gy, kind or "arrow_tower", true)
 end
 
 local probeBest, probeBestD = 0, math.huge
@@ -39,31 +31,32 @@ local function probeCallback(j)
   end
 end
 
-local function update(dt, hash, projectiles)
-  local d = buildingData.arrow_tower
+function Towers.update(dt, hash, projectiles)
+  local B = Buildings
   local E = Enemies
-  for i = 1, #Towers.list do
-    local t = Towers.list[i]
-    t.cooldown = t.cooldown - dt
-    if t.cooldown <= 0 then
-      probeBest = 0
-      probeBestD = d.range * d.range
-      probeX = t.x
-      probeY = t.y
-      hash:queryCircle(t.x, t.y, d.range, probeCallback)
-      local j = probeBest
-      if j > 0 then
-        t.cooldown = d.fireInterval
-        Towers.shots = Towers.shots + 1
-        local flight = math.sqrt(probeBestD) / d.projectileSpeed
-        local aimX = E.x[j] + E.hx[j] * E.speed[j] * flight
-        local aimY = E.y[j] + E.hy[j] * E.speed[j] * flight
-        projectiles.spawn(t.x, t.y, aimX, aimY, d.projectileSpeed, d.damage)
+  for i = 1, B.n do
+    if B.isTower[i] and B.built[i] and B.crewCount[i] >= B.maxCrew[i] then
+      B.cd[i] = B.cd[i] - dt
+      if B.cd[i] <= 0 then
+        local d = buildingData[B.kind[i]]
+        probeBest = 0
+        probeBestD = d.range * d.range
+        probeX = B.x[i]
+        probeY = B.y[i]
+        hash:queryCircle(B.x[i], B.y[i], d.range, probeCallback)
+        local j = probeBest
+        if j > 0 then
+          B.cd[i] = d.fireInterval
+          Towers.shots = Towers.shots + 1
+          local flight = math.sqrt(probeBestD) / d.projectileSpeed
+          projectiles.spawn(B.x[i], B.y[i],
+            E.x[j] + E.hx[j] * E.speed[j] * flight,
+            E.y[j] + E.hy[j] * E.speed[j] * flight,
+            d.projectileSpeed, d.damage)
+        end
       end
     end
   end
 end
-
-Towers.update = update
 
 return Towers

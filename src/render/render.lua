@@ -1,7 +1,9 @@
 local Grid = require("src.sim.grid")
 local Camera = require("src.core.camera")
-local Towers = require("src.sim.towers")
 local Walls = require("src.sim.walls")
+local Buildings = require("src.sim.buildings")
+local Villagers = require("src.sim.villagers")
+local Nodes = require("src.sim.nodes")
 local buildingData = require("src.data.buildings")
 
 local Render = {}
@@ -15,6 +17,10 @@ local C = {
   villageLine = { 0.62, 0.28, 0.72 },
   tower = { 0.62, 0.62, 0.70 },
   towerLine = { 0.16, 0.16, 0.22 },
+  ballista = { 0.72, 0.62, 0.45 },
+  house = { 0.52, 0.38, 0.26 },
+  houseRoof = { 0.30, 0.20, 0.14 },
+  construct = { 0.55, 0.50, 0.38 },
   wall = { 0.45, 0.42, 0.52 },
   wallLine = { 0.20, 0.18, 0.26 },
   wallFlash = { 1, 0.9, 0.7 },
@@ -23,6 +29,25 @@ local C = {
   hpBarBack = { 0.12, 0.12, 0.14 },
   ghostOk = { 0.35, 0.9, 0.45, 0.35 },
   ghostBad = { 1, 0.28, 0.28, 0.35 },
+  treeCanopy = { 0.16, 0.34, 0.18 },
+  treeTrunk = { 0.38, 0.27, 0.16 },
+  bush = { 0.18, 0.38, 0.20 },
+  berry = { 0.85, 0.22, 0.30 },
+  rock = { 0.55, 0.55, 0.62 },
+  rockLine = { 0.32, 0.32, 0.38 },
+  villagerM = { 0.45, 0.42, 0.82 },
+  villagerF = { 0.82, 0.46, 0.70 },
+  villagerLine = { 0.12, 0.10, 0.18 },
+  crewGood = { 0.40, 0.90, 0.40 },
+  crewBad = { 0.90, 0.30, 0.30 },
+  offline = { 0.95, 0.25, 0.25 },
+  select = { 0.95, 0.92, 1.0 },
+}
+
+local RES_COLOR = {
+  wood = { 0.55, 0.38, 0.20 },
+  food = { 0.90, 0.30, 0.35 },
+  stone = { 0.65, 0.65, 0.72 },
 }
 
 local enemyBatch, enemyQuad
@@ -60,9 +85,11 @@ function Render.draw(S)
   Render.initSprites()
   love.graphics.clear(C.bg)
   Render.terrain()
+  Render.nodes(S)
   Render.village(S.village)
   Render.walls(S)
-  Render.towers(S)
+  Render.villagers(S)
+  Render.buildings(S)
   Render.enemies(S.enemies)
   Render.projectiles(S.projectiles)
   Render.ghost(S)
@@ -84,6 +111,36 @@ function Render.terrain()
   love.graphics.setColor(C.border)
   love.graphics.setLineWidth(4)
   love.graphics.rectangle("line", 0, 0, Grid.pixelWidth(), Grid.pixelHeight())
+end
+
+function Render.nodes(S)
+  local x0, y0, x1, y1 = Camera.viewBounds()
+  love.graphics.setLineWidth(1)
+  for i = 1, #Nodes.list do
+    local nd = Nodes.list[i]
+    if nd.x >= x0 - 20 and nd.x <= x1 + 20 and nd.y >= y0 - 20 and nd.y <= y1 + 20 then
+      if nd.kind == "tree" then
+        love.graphics.setColor(C.treeTrunk)
+        love.graphics.line(nd.x, nd.y + 4, nd.x, nd.y - 2)
+        love.graphics.setColor(C.treeCanopy)
+        love.graphics.circle("fill", nd.x, nd.y - 4, 8)
+      elseif nd.kind == "berry" then
+        love.graphics.setColor(C.bush)
+        love.graphics.circle("fill", nd.x, nd.y, 7)
+        local dots = math.ceil(nd.amount / 5)
+        love.graphics.setColor(C.berry)
+        for k = 1, dots do
+          local a = k * 2.2
+          love.graphics.circle("fill", nd.x + math.cos(a) * 4, nd.y + math.sin(a) * 4, 1.6)
+        end
+      else
+        love.graphics.setColor(C.rock)
+        love.graphics.circle("fill", nd.x, nd.y, 7, 6)
+        love.graphics.setColor(C.rockLine)
+        love.graphics.circle("line", nd.x, nd.y, 7, 6)
+      end
+    end
+  end
 end
 
 function Render.village(v)
@@ -123,14 +180,120 @@ function Render.walls()
   end
 end
 
-function Render.towers(S)
-  for i = 1, #S.towers.list do
-    local t = S.towers.list[i]
-    love.graphics.setColor(C.tower)
-    love.graphics.rectangle("fill", t.x - 12, t.y - 12, 24, 24, 3)
-    love.graphics.setColor(C.towerLine)
-    love.graphics.setLineWidth(2)
-    love.graphics.rectangle("line", t.x - 12, t.y - 12, 24, 24, 3)
+function Render.villagers(S)
+  local list = Villagers.list
+  local sel = S.selection and S.selection.villager or nil
+  love.graphics.setLineWidth(1)
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead then
+      love.graphics.setColor(v.sex == "f" and C.villagerF or C.villagerM)
+      love.graphics.circle("fill", v.x, v.y, v.r)
+      love.graphics.setColor(C.villagerLine)
+      love.graphics.circle("line", v.x, v.y, v.r)
+      if v.carry > 0 and RES_COLOR[v.carryRes] then
+        local rc = RES_COLOR[v.carryRes]
+        love.graphics.setColor(rc[1], rc[2], rc[3])
+        love.graphics.circle("fill", v.x, v.y - v.r - 3, 2.2)
+      end
+      if v.flash > 0 then
+        love.graphics.setColor(C.flash[1], C.flash[2], C.flash[3], math.min(1, v.flash * 9))
+        love.graphics.circle("fill", v.x, v.y, v.r)
+      end
+      if v == sel then
+        love.graphics.setColor(C.select)
+        love.graphics.circle("line", v.x, v.y, v.r + 3)
+      end
+    end
+  end
+end
+
+local function crewPips(x, y, crewCount, maxCrew)
+  love.graphics.setLineWidth(1)
+  local total = maxCrew
+  local w = total * 8 - 3
+  local px = x - w / 2 + 2
+  for k = 1, total do
+    if k <= crewCount then
+      love.graphics.setColor(C.crewGood)
+      love.graphics.circle("fill", px, y, 2.4)
+    else
+      love.graphics.setColor(C.crewBad)
+      love.graphics.circle("line", px, y, 2.4)
+    end
+    px = px + 8
+  end
+end
+
+function Render.buildings(S)
+  local B = Buildings
+  local sel = S.selection and S.selection.building or nil
+  for i = 1, B.n do
+    local x, y = B.x[i], B.y[i]
+    local kind = B.kind[i]
+    if not B.built[i] then
+      local d = buildingData[kind]
+      local frac = B.progress[i] / d.buildTime
+      love.graphics.setColor(C.construct[1], C.construct[2], C.construct[3], 0.35 + 0.4 * frac)
+      love.graphics.rectangle("fill", x - 12, y - 12, 24, 24, 3)
+      love.graphics.setColor(C.construct)
+      love.graphics.setLineWidth(1)
+      love.graphics.rectangle("line", x - 12, y - 12, 24, 24, 3)
+      love.graphics.setColor(C.hpBarBack)
+      love.graphics.rectangle("fill", x - 12, y + 14, 24, 3)
+      love.graphics.setColor(C.hpBar)
+      love.graphics.rectangle("fill", x - 12, y + 14, 24 * frac, 3)
+    elseif kind == "house" then
+      love.graphics.setColor(C.house)
+      love.graphics.rectangle("fill", x - 11, y - 6, 22, 17, 2)
+      love.graphics.setColor(C.houseRoof)
+      love.graphics.polygon("fill", x - 13, y - 6, x, y - 16, x + 13, y - 6)
+      love.graphics.setColor(C.wallLine)
+      love.graphics.setLineWidth(1)
+      love.graphics.rectangle("line", x - 11, y - 6, 22, 17, 2)
+      if B.flash[i] > 0 then
+        love.graphics.setColor(C.wallFlash[1], C.wallFlash[2], C.wallFlash[3], math.min(1, B.flash[i] * 8))
+        love.graphics.rectangle("fill", x - 12, y - 16, 24, 28, 2)
+      end
+    else
+      local isBallista = kind == "ballista"
+      local half = isBallista and 14 or 12
+      love.graphics.setColor(isBallista and C.ballista or C.tower)
+      love.graphics.rectangle("fill", x - half, y - half, half * 2, half * 2, 3)
+      love.graphics.setColor(C.towerLine)
+      love.graphics.setLineWidth(2)
+      love.graphics.rectangle("line", x - half, y - half, half * 2, half * 2, 3)
+      if isBallista then
+        love.graphics.setLineWidth(2)
+        love.graphics.line(x, y - 6, x, y + 8)
+        love.graphics.line(x - 6, y + 2, x + 6, y + 2)
+      end
+      if B.crewCount[i] < B.maxCrew[i] then
+        love.graphics.setColor(C.offline)
+        love.graphics.setLineWidth(2)
+        love.graphics.line(x - 8, y - 8, x + 8, y + 8)
+      end
+      crewPips(x, y + half + 6, B.crewCount[i], B.maxCrew[i])
+      if B.flash[i] > 0 then
+        love.graphics.setColor(C.wallFlash[1], C.wallFlash[2], C.wallFlash[3], math.min(1, B.flash[i] * 8))
+        love.graphics.rectangle("fill", x - half, y - half, half * 2, half * 2, 3)
+      end
+    end
+    if i == sel then
+      love.graphics.setColor(C.select)
+      love.graphics.setLineWidth(1)
+      love.graphics.rectangle("line", x - 17, y - 17, 34, 34, 3)
+    end
+  end
+  love.graphics.setLineWidth(1)
+  for i = 1, B.n do
+    if B.built[i] and B.hp[i] < B.maxHp[i] then
+      local x, y = B.x[i], B.y[i]
+      love.graphics.setColor(C.hpBarBack)
+      love.graphics.rectangle("fill", x - 12, y - 22, 24, 3)
+      love.graphics.setColor(C.hpBar)
+      love.graphics.rectangle("fill", x - 12, y - 22, 24 * (B.hp[i] / B.maxHp[i]), 3)
+    end
   end
 end
 
@@ -183,16 +346,17 @@ function Render.ghost(S)
   local mx, my = love.mouse.getPosition()
   local wx, wy = Camera.toWorld(mx, my)
   local gx, gy = Grid.worldToTile(wx, wy)
+  local t = S.buildType
   local ok
-  if S.buildType == "wall" then
-    ok = Walls.canPlace(gx, gy)
+  if t == "wall" then
+    ok = Walls.canPlace(gx, gy) and S.canAfford(buildingData.wall.cost)
   else
-    ok = Towers.canPlace(gx, gy, S.village)
+    ok = Buildings.canPlace(gx, gy, S.village) and S.canAfford(buildingData[t].cost)
   end
   love.graphics.setColor(ok and C.ghostOk or C.ghostBad)
   love.graphics.rectangle("fill", gx * Grid.TILE, gy * Grid.TILE, Grid.TILE, Grid.TILE)
-  if S.buildType ~= "wall" then
-    local d = buildingData.arrow_tower
+  local d = buildingData[t]
+  if d and d.range then
     love.graphics.setLineWidth(1)
     love.graphics.circle("line", (gx + 0.5) * Grid.TILE, (gy + 0.5) * Grid.TILE, d.range)
   end
