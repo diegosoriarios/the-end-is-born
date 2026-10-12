@@ -1,5 +1,7 @@
 local Grid = require("src.sim.grid")
 local buildingData = require("src.data.buildings")
+local Particles = require("src.fx.particles")
+local Camera = require("src.core.camera")
 
 local Walls = { n = 0, gx = {}, gy = {}, hp = {}, maxHp = {}, flash = {} }
 
@@ -50,6 +52,9 @@ end
 function Walls.remove(i)
   local n = Walls.n
   local cRemoved = Grid.cellIndex(Walls.gx[i], Walls.gy[i])
+  local wx, wy = Grid.tileToWorld(Walls.gx[i], Walls.gy[i])
+  Particles.dust(wx, wy, 8)
+  Camera.shake(2, 0.2)
   index[cRemoved] = nil
   Grid.occupancy[cRemoved] = Grid.OCC_NONE
   if i ~= n then
@@ -68,6 +73,23 @@ function Walls.damage(i, amount)
   Walls.hp[i] = Walls.hp[i] - amount
   Walls.flash[i] = 0.1
   if Walls.hp[i] <= 0 then Walls.remove(i) end
+end
+
+function Walls.load(list)
+  Walls.clear()
+  for i = 1, #list do
+    local w = list[i]
+    Walls.gx[i] = w.gx
+    Walls.gy[i] = w.gy
+    Walls.hp[i] = w.hp
+    Walls.maxHp[i] = w.maxHp
+    Walls.flash[i] = 0
+    local c = Grid.cellIndex(w.gx, w.gy)
+    index[c] = i
+    Grid.occupancy[c] = Grid.OCC_WALL
+  end
+  Walls.n = #list
+  changed()
 end
 
 function Walls.update(dt)

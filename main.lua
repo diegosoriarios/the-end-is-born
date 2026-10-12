@@ -4,14 +4,41 @@ local Grid = require("src.sim.grid")
 local Enemies = require("src.sim.enemies")
 local Villagers = require("src.sim.villagers")
 local Buildings = require("src.sim.buildings")
+local Audio = require("src.audio.audio")
+local Settings = require("src.core.settings")
+local Menu = require("src.ui.menu")
 
 local FIXED_DT = 1 / 60
 
 function love.load()
+  Audio.load()
+  Settings.load()
+  Settings.apply()
+  Menu.load()
   State.reset()
+  if State.menu or not State.harness then
+    State.mode = "menu"
+  end
+  Audio.startMusic()
 end
 
 function love.update(dt)
+  if State.menu then
+    State.menu = State.menu - 1
+    if State.menu == 220 then State.settingsOpen = true end
+    if State.menu == 200 then love.graphics.captureScreenshot("menu_settings.png") end
+    if State.menu == 150 then State.settingsOpen = false end
+    if State.menu == 60 then love.graphics.captureScreenshot("menu_title.png") end
+    if State.menu <= 0 then
+      print(("[menu] done: mode=%s settings=%s paused=%s"):format(State.mode, tostring(State.settingsOpen), tostring(State.paused)))
+      love.event.quit()
+    end
+  end
+  if State.mode == "menu" then return end
+  if State.paused then
+    State.accumulator = 0
+    return
+  end
   local frameT0 = love.timer.getTime()
   State.frameT0 = frameT0
   State.accumulator = (State.accumulator or 0) + math.min(dt, 0.1)
@@ -24,8 +51,20 @@ function love.update(dt)
 end
 
 function love.draw()
+  if State.mode == "menu" then
+    Menu.drawTitle(State)
+    if State.settingsOpen then Menu.drawSettings(State) end
+    return
+  end
   local drawT0 = love.timer.getTime()
   State.draw()
+  if State.mode == "playing" and State.paused then
+    if State.settingsOpen then
+      Menu.drawSettings(State)
+    else
+      Menu.drawPause(State)
+    end
+  end
   local now = love.timer.getTime()
   State.stats.drawMs = State.stats.drawMs * 0.95 + (now - drawT0) * 1000 * 0.05
   State.stats.frameMs = State.stats.frameMs * 0.95 + (now - (State.frameT0 or now)) * 1000 * 0.05
@@ -33,31 +72,44 @@ end
 
 function love.keypressed(key)
   if key == "escape" then
-    if State.selection then
+    if State.settingsOpen then
+      State.settingsOpen = false
+    elseif State.paused then
+      State.paused = false
+    elseif State.mode == "menu" then
+      love.event.quit()
+    elseif State.selection then
       State.selection = nil
       State.follow = false
     elseif State.buildMode then
       State.buildMode = false
     else
-      love.event.quit()
+      State.paused = true
     end
-  elseif key == "r" then
+    return
+  end
+  if State.mode ~= "playing" or State.paused or State.settingsOpen then return end
+  if key == "r" then
     State.reset()
-  elseif key == "1" and State.mode == "playing" then
+  elseif key == "1" then
     State.setBuildType("wall")
-  elseif key == "2" and State.mode == "playing" then
+  elseif key == "2" then
     State.setBuildType("arrow_tower")
-  elseif key == "3" and State.mode == "playing" then
+  elseif key == "3" then
     State.setBuildType("ballista")
-  elseif key == "4" and State.mode == "playing" then
+  elseif key == "4" then
     State.setBuildType("house")
-  elseif key == "b" and State.mode == "playing" then
+  elseif key == "5" then
+    State.setBuildType("altar")
+  elseif key == "c" then
+    State.checklistVisible = not State.checklistVisible
+  elseif key == "b" then
     State.buildMode = not State.buildMode
   elseif key == "space" then
     State.waves:skip()
   elseif key == "f3" then
     State.debug = not State.debug
-  elseif key == "k" and State.mode == "playing" then
+  elseif key == "k" then
     local count = love.keyboard.isDown("lshift", "rshift") and 10000 or 1000
     local W, H = Grid.pixelWidth(), Grid.pixelHeight()
     local m = 24
@@ -76,10 +128,18 @@ function love.keypressed(key)
       Enemies.spawn(x, y, "grunt", 1)
     end
     print("[debug] spawned " .. count .. " enemies (total " .. Enemies.n .. ")")
+  elseif key == "p" then
+    local cal = State.waves.calendar
+    cal.apocalypse = not cal.apocalypse
+    print("[debug] end times " .. (cal.apocalypse and "begun — hordes come every month" or "averted"))
   end
 end
 
 function love.mousepressed(x, y, button)
+  if State.mode == "menu" or State.paused or State.settingsOpen then
+    if button == 1 then Menu.handleClick(x, y, State) end
+    return
+  end
   if button == 1 then
     if State.handleClick(x, y) then return end
     if State.buildMode then
@@ -113,5 +173,6 @@ function love.mousepressed(x, y, button)
 end
 
 function love.wheelmoved(_, dy)
+  if State.mode == "menu" or State.paused or State.settingsOpen then return end
   Camera.zoomBy(dy)
 end

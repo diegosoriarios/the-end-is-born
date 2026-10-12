@@ -14,10 +14,19 @@ case "$1" in
   --stress2) touch "$DIR/stress2.flag"; shift ;;
   --smoke)   touch "$DIR/smoke.flag";   shift ;;
   --test)    touch "$DIR/test.flag";    shift ;;
+  --life)    touch "$DIR/life.flag";    shift ;;
+  --menu)    touch "$DIR/menu.flag";    shift ;;
+  --shot)    touch "$DIR/shot.flag";    shift ;;
+  --save)    touch "$DIR/save.flag";    shift ;;
 esac
 
 if command -v arch >/dev/null 2>&1 && arch -x86_64 /usr/bin/true 2>/dev/null; then
-  exec arch -x86_64 "$LOVE" "$DIR" "$@"
+  arch -x86_64 "$LOVE" "$DIR" "$@"
 else
-  exec "$LOVE" "$DIR" "$@"
+  "$LOVE" "$DIR" "$@"
 fi
+rc=$?
+# Harness flag files are consumed at load; remove them so the next plain run
+# starts the game normally (and the next harness gets a clean pick).
+rm -f "$DIR/smoke.flag" "$DIR/stress.flag" "$DIR/stress2.flag" "$DIR/test.flag" "$DIR/life.flag" "$DIR/menu.flag" "$DIR/shot.flag" "$DIR/save.flag"
+exit $rc

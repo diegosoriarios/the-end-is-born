@@ -4,6 +4,9 @@ local Flow = require("src.sim.flowfield")
 local Walls = require("src.sim.walls")
 local Buildings = require("src.sim.buildings")
 local Villagers = require("src.sim.villagers")
+local Shots = require("src.sim.enemyShots")
+local Particles = require("src.fx.particles")
+local Audio = require("src.audio.audio")
 
 local floor = math.floor
 local sqrt = math.sqrt
@@ -34,9 +37,13 @@ end
 table.sort(KINDS)
 for i, name in ipairs(KINDS) do kindIndex[name] = i end
 
-local attackInterval = {}
+local attackInterval, wallMul, rangeOf, projSpeed = {}, {}, {}, {}
 for i, name in ipairs(KINDS) do
-  attackInterval[i] = enemyData[name].attackInterval
+  local d = enemyData[name]
+  attackInterval[i] = d.attackInterval
+  wallMul[i] = d.wallDamageMul or 1
+  rangeOf[i] = d.range or 0
+  projSpeed[i] = d.projectileSpeed or 0
 end
 
 local flowX, flowY = Flow.flowX, Flow.flowY
@@ -66,6 +73,8 @@ local function damage(i, amount)
   if Enemies.hp[i] <= 0 then return end
   Enemies.hp[i] = Enemies.hp[i] - amount
   Enemies.hitFlash[i] = 0.08
+  Particles.blood(Enemies.x[i], Enemies.y[i], 1)
+  Audio.play("hit")
 end
 
 local function compact()
@@ -73,6 +82,8 @@ local function compact()
   local i = 1
   while i <= E.n do
     if E.hp[i] <= 0 then
+      Particles.blood(E.x[i], E.y[i], 3)
+      if love.math.random() < 0.5 then Audio.play("squelch") end
       local last = E.n
       E.x[i] = E.x[last]
       E.y[i] = E.y[last]
@@ -170,14 +181,38 @@ local function update(dt, ctx)
     if E.hitFlash[i] > 0 then E.hitFlash[i] = E.hitFlash[i] - dt end
     local xi = E.x[i]
     local yi = E.y[i]
+    local kindI = E.kind[i]
     local dxv = v.x - xi
     local dyv = v.y - yi
+    local d2v = dxv * dxv + dyv * dyv
     local stop = v.r + E.r[i]
-    if dxv * dxv + dyv * dyv < stop * stop then
+    local rng = rangeOf[kindI]
+    if rng > 0 and d2v < (rng + v.r) * (rng + v.r) then
       E.blk[i] = 0
       E.attackTimer[i] = E.attackTimer[i] - dt
       if E.attackTimer[i] <= 0 then
-        E.attackTimer[i] = attackInterval[E.kind[i]]
+        E.attackTimer[i] = attackInterval[kindI]
+        local tx, ty = v.x, v.y
+        local best, bd = 0, rng * rng
+        for b = 1, Buildings.n do
+          local dx = Buildings.x[b] - xi
+          local dy = Buildings.y[b] - yi
+          local d2 = dx * dx + dy * dy
+          if d2 < bd then
+            bd = d2
+            best = b
+          end
+        end
+        if best > 0 then
+          tx, ty = Buildings.x[best], Buildings.y[best]
+        end
+        Shots.spawn(xi, yi, tx, ty, projSpeed[kindI], E.dmg[i])
+      end
+    elseif d2v < stop * stop then
+      E.blk[i] = 0
+      E.attackTimer[i] = E.attackTimer[i] - dt
+      if E.attackTimer[i] <= 0 then
+        E.attackTimer[i] = attackInterval[kindI]
         pvX, pvY = xi, yi
         pvRange = E.r[i] + 12
         local pv = villagerNear(ctx)
@@ -185,6 +220,7 @@ local function update(dt, ctx)
           Villagers.damage(pv, E.dmg[i])
         else
           v.hp = math.max(0, v.hp - E.dmg[i])
+          Particles.blood(xi, yi, 2)
         end
       end
     else
@@ -279,18 +315,18 @@ local function update(dt, ctx)
           pvRange = E.r[i] + 12
           local pv = villagerNear(ctx)
           if pv then
-            E.attackTimer[i] = attackInterval[E.kind[i]]
+            E.attackTimer[i] = attackInterval[kindI]
             Villagers.damage(pv, E.dmg[i])
           else
             local w = wallAdjacent(i)
             if w > 0 then
-              E.attackTimer[i] = attackInterval[E.kind[i]]
-              Walls.damage(w, E.dmg[i])
+              E.attackTimer[i] = attackInterval[kindI]
+              Walls.damage(w, E.dmg[i] * wallMul[kindI])
             else
               local b = buildingAdjacent(i)
               if b > 0 then
-                E.attackTimer[i] = attackInterval[E.kind[i]]
-                Buildings.damage(b, E.dmg[i])
+                E.attackTimer[i] = attackInterval[kindI]
+                Buildings.damage(b, E.dmg[i] * wallMul[kindI])
               end
             end
           end
@@ -304,5 +340,7 @@ Enemies.spawn = spawn
 Enemies.damage = damage
 Enemies.compact = compact
 Enemies.update = update
+Enemies.KINDS = KINDS
+Enemies.kindIndex = kindIndex
 
 return Enemies

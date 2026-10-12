@@ -1,6 +1,8 @@
 local buildingData = require("src.data.buildings")
 local Buildings = require("src.sim.buildings")
 local Enemies = require("src.sim.enemies")
+local Particles = require("src.fx.particles")
+local Audio = require("src.audio.audio")
 
 local Towers = { shots = 0 }
 
@@ -48,6 +50,8 @@ function Towers.update(dt, hash, projectiles)
         if j > 0 then
           B.cd[i] = d.fireInterval
           Towers.shots = Towers.shots + 1
+          Particles.muzzle(B.x[i], B.y[i], E.x[j] - B.x[i], E.y[j] - B.y[i], "spark")
+          Audio.play(B.kind[i] == "ballista" and "ballista" or "shoot")
           local flight = math.sqrt(probeBestD) / d.projectileSpeed
           projectiles.spawn(B.x[i], B.y[i],
             E.x[j] + E.hx[j] * E.speed[j] * flight,

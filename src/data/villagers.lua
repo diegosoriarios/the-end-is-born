@@ -9,4 +9,8 @@ return {
   eatRelief = 60,
   starveDps = 3,
   wanderInterval = 2.5,
+  pregnancyMonths = 9,
+  growMonths = 12,
+  askEvery = 6,
+  childR = 3,
 }

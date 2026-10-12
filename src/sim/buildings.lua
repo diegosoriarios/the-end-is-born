@@ -1,5 +1,7 @@
 local Grid = require("src.sim.grid")
 local buildingData = require("src.data.buildings")
+local Particles = require("src.fx.particles")
+local Camera = require("src.core.camera")
 
 local Buildings = {
   n = 0,
@@ -65,6 +67,7 @@ function Buildings.place(gx, gy, kind, instant)
   local c = Grid.cellIndex(gx, gy)
   index[c] = i
   Grid.occupancy[c] = Grid.OCC_BUILD
+  Particles.dust(wx, wy, 6)
   changed()
   return i
 end
@@ -75,6 +78,8 @@ function Buildings.remove(i)
   local c = Grid.cellIndex(Buildings.gx[i], Buildings.gy[i])
   index[c] = nil
   Grid.occupancy[c] = Grid.OCC_NONE
+  Particles.dust(Buildings.x[i], Buildings.y[i], 12)
+  Camera.shake(4, 0.3)
   if i ~= n then
     Buildings.kind[i] = Buildings.kind[n]
     Buildings.gx[i] = Buildings.gx[n]
@@ -108,6 +113,39 @@ function Buildings.update(dt)
   for i = 1, Buildings.n do
     if Buildings.flash[i] > 0 then Buildings.flash[i] = Buildings.flash[i] - dt end
   end
+end
+
+-- Rebuild the registry from saved primitives (bypasses place() cost/hooks).
+function Buildings.load(list)
+  Buildings.clear()
+  for i = 1, #list do
+    local b = list[i]
+    Buildings.kind[i] = b.kind
+    Buildings.gx[i] = b.gx
+    Buildings.gy[i] = b.gy
+    Buildings.x[i], Buildings.y[i] = Grid.tileToWorld(b.gx, b.gy)
+    Buildings.hp[i] = b.hp
+    Buildings.maxHp[i] = b.maxHp
+    Buildings.progress[i] = b.progress
+    Buildings.built[i] = b.built
+    Buildings.flash[i] = 0
+    Buildings.crewCount[i] = b.crewCount or 0
+    Buildings.maxCrew[i] = b.maxCrew or 0
+    Buildings.cd[i] = b.cd or 0
+    Buildings.isTower[i] = b.kind == "arrow_tower" or b.kind == "ballista"
+    local c = Grid.cellIndex(b.gx, b.gy)
+    index[c] = i
+    Grid.occupancy[c] = Grid.OCC_BUILD
+  end
+  Buildings.n = #list
+  changed()
+end
+
+function Buildings.hasBuilt(kind)
+  for i = 1, Buildings.n do
+    if Buildings.kind[i] == kind and Buildings.built[i] then return true end
+  end
+  return false
 end
 
 function Buildings.popCap()

@@ -2,4 +2,8 @@ smoke.flag
 stress.flag
 stress2.flag
 test.flag
+life.flag
+menu.flag
+shot.flag
+save.flag
 .DS_Store

@@ -3,14 +3,19 @@ local SpatialHash = require("src.sim.spatialhash")
 local Enemies = require("src.sim.enemies")
 local Towers = require("src.sim.towers")
 local Projectiles = require("src.sim.projectiles")
+local EnemyShots = require("src.sim.enemyShots")
 local Village = require("src.sim.village")
 local Waves = require("src.sim.waves")
 local Walls = require("src.sim.walls")
 local Buildings = require("src.sim.buildings")
 local Villagers = require("src.sim.villagers")
+local Checklist = require("src.sim.checklist")
 local Nodes = require("src.sim.nodes")
 local Flow = require("src.sim.flowfield")
 local Camera = require("src.core.camera")
+local Particles = require("src.fx.particles")
+local Audio = require("src.audio.audio")
+local Persistence = require("src.core.persistence")
 local Render = require("src.render.render")
 local UI = require("src.ui.ui")
 local resData = require("src.data.resources")
@@ -82,11 +87,16 @@ function State.reset()
   State.accumulator = 0
   State.selection = nil
   State.follow = false
+  State.checklistVisible = true
   Grid.resetOccupancy()
+  Particles.clear()
+  State.flash = 0
+  State._prevHp = nil
   State.hash = SpatialHash.new(Grid.TILE)
   Enemies.n = 0
   Towers.clear()
   Projectiles.n = 0
+  EnemyShots.n = 0
   Walls.clear()
   Buildings.clear()
   Villagers.clear()
@@ -100,12 +110,22 @@ function State.reset()
   State.enemies = Enemies
   State.towers = Towers
   State.projectiles = Projectiles
+  State.enemyShots = EnemyShots
   State.walls = Walls
   State.buildings = Buildings
   State.villagers = Villagers
   State.nodes = Nodes
   State.flow = Flow
   State.waves = Waves.new()
+  State.checklist = Checklist
+  Checklist.reset()
+  Villagers.onSacrificed = function()
+    Checklist.sacrifices = Checklist.sacrifices + 1
+  end
+  Villagers.onNotice = function(text, sub)
+    Checklist.notice(text, sub)
+  end
+  State.ending = nil
   State.stats = { simMs = 0, drawMs = 0, frameMs = 0, stepMs = 0 }
   State.villageCells = Grid.cellsInCircle(State.village.x, State.village.y, State.village.r)
   for _, c in ipairs(State.villageCells) do
@@ -125,7 +145,17 @@ function State.reset()
   end
   State.smoke = nil
   State.stress = nil
-  if love.filesystem.getInfo("smoke.flag") then
+  State.menu = nil
+  if love.filesystem.getInfo("menu.flag") then
+    State.menu = 300
+    State.settingsOpen = false
+  elseif love.filesystem.getInfo("shot.flag") then
+    State.shot = 300
+    State.shotAction = 240
+  elseif love.filesystem.getInfo("save.flag") then
+    State.save = 400
+    State.saveAction = 340
+  elseif love.filesystem.getInfo("smoke.flag") then
     State.smoke = 2600
     State.smokeAction = 2570
   elseif love.filesystem.getInfo("stress.flag") then
@@ -141,6 +171,18 @@ function State.reset()
   elseif love.filesystem.getInfo("test.flag") then
     State.test = 900
     State.testAction = 840
+  elseif love.filesystem.getInfo("life.flag") then
+    State.life = 900
+    State.lifeAction = 840
+    State.lifePhase = "setup"
+    State.lifeGestate = nil
+  end
+  State.harness = (State.smoke or State.stress or State.stress2 or State.test or State.life or State.menu or State.shot or State.save) and true or false
+  State.paused = false
+  State._savedYear = State.waves.calendar.year
+  State._pendingSave = false
+  if State.harness then
+    Audio.setEnabled(false)
   end
   Camera.reset()
 end
@@ -249,6 +291,146 @@ local function testUpdate()
   end
 end
 
+local function lifeUpdate()
+  local v = State.village
+  if State.lifeAction and State.life == State.lifeAction then
+    v.hp, v.maxHp = 1e9, 1e9
+    local function tile(dx, dy)
+      return Grid.worldToTile(v.x + dx * Grid.TILE, v.y + dy * Grid.TILE)
+    end
+    local hx, hy = tile(4, 0)
+    local houseA = Buildings.place(hx, hy, "house", true)
+    local bx, by = tile(-4, 0)
+    local houseB = Buildings.place(bx, by, "house", true)
+    local ax, ay = tile(0, 4)
+    local altar = Buildings.place(ax, ay, "altar", true)
+    local okA = Villagers.bindCouple(houseA)
+    local okB = Villagers.bindCouple(houseB)
+    Villagers.choose(houseA)
+    local cB = Villagers.coupleAt(houseB)
+    if cB then
+      cB.pending = true
+      Villagers.request = cB
+      Villagers.allowBirth()
+    end
+    local conc = Villagers.startConception(altar)
+    print(("[life] setup: coupleA=%s coupleB=%s conceive=%s"):format(tostring(okA), tostring(okB), tostring(conc)))
+    State.lifePhase = "walk"
+    State.lifeAction = nil
+  end
+  if State.lifePhase == "walk" then
+    local c = Villagers.chosenCouple()
+    if c and c.conceived then
+      State.lifePhase = "gestate"
+      State.lifeGestate = State.life - 90
+      print("[life] conceived — the end times begin")
+    end
+  elseif State.lifePhase == "gestate" and State.lifeGestate and State.life == State.lifeGestate then
+    State.waves.calendar.epoch = State.waves.calendar.epoch + 9
+    print("[life] advanced 9 months")
+  end
+  if State.mode == "victory" or State.mode == "gameover" or State.life <= 0 then
+    local children = 0
+    for _, vv in ipairs(Villagers.list) do
+      if not vv.dead and vv.age == "child" then children = children + 1 end
+    end
+    print(("[life] done: mode=%s ending=%s conceived=%s apocalypse=%s couples=%d children=%d servants=%d")
+      :format(State.mode, tostring(State.ending), tostring(Villagers.conceived), tostring(State.waves.calendar.apocalypse),
+        #Villagers.couples, children, Villagers.count()))
+    love.event.quit()
+    State.life = nil
+  end
+end
+
+local function shotUpdate()
+  local v = State.village
+  if State.shotAction and State.shot == State.shotAction then
+    v.hp, v.maxHp = 1e9, 1e9
+    local function place(dx, dy, kind)
+      local gx, gy = Grid.worldToTile(v.x + dx * Grid.TILE, v.y + dy * Grid.TILE)
+      if Buildings.canPlace(gx, gy, v) then return Buildings.place(gx, gy, kind, true) end
+      return 0
+    end
+    local tw = place(3, 0, "arrow_tower")
+    local ba = place(-3, 0, "ballista")
+    place(0, 4, "house")
+    place(5, 3, "house")
+    place(0, -3, "altar")
+    if tw > 0 then Villagers.assignCrew(tw) end
+    if ba > 0 then Villagers.assignCrew(ba) end
+    for gx = -3, 3 do
+      local wx, wy = Grid.worldToTile(v.x + gx * Grid.TILE, v.y + 6 * Grid.TILE)
+      if Walls.canPlace(wx, wy) then Walls.place(wx, wy) end
+    end
+    local kinds = { "grunt", "runner", "brute", "spitter", "grunt", "grunt" }
+    for k = 1, 44 do
+      local kind = kinds[(k % #kinds) + 1]
+      Enemies.spawn(v.x + 190 + (k % 6) * 18, v.y - 120 + math.floor(k / 6) * 18, kind, 1)
+    end
+    Camera.zoom = 1.6
+    Camera.x = v.x + 120
+    Camera.y = v.y - 40
+    Camera.clamp()
+    State.shotAction = nil
+  end
+  if State.shot and State.shot <= 40 then State.flash = 0 end
+  if State.shot <= 0 then
+    print("[shot] done: captured shot.png")
+    love.event.quit()
+    State.shot = nil
+  end
+end
+
+local function saveUpdate()
+  local v = State.village
+  if State.saveAction and State.save == State.saveAction then
+    v.hp, v.maxHp = 1e9, 1e9
+    State.stock.wood, State.stock.food = 777, 555
+    local hx, hy = Grid.worldToTile(v.x + 4 * Grid.TILE, v.y)
+    local house = Buildings.place(hx, hy, "house", true)
+    local ax, ay = Grid.worldToTile(v.x, v.y + 4 * Grid.TILE)
+    Buildings.place(ax, ay, "altar", true)
+    local bx, by = Grid.worldToTile(v.x - 4 * Grid.TILE, v.y)
+    Buildings.place(bx, by, "arrow_tower", true)
+    Villagers.bindCouple(house)
+    Villagers.choose(house)
+    State._saveBefore = {
+      buildings = Buildings.n, wood = State.stock.wood, couples = #Villagers.couples,
+      year = State.waves.calendar.year, month = State.waves.calendar.month,
+      villagers = #Villagers.list, nodes = #Nodes.list,
+    }
+    local b = State._saveBefore
+    local ok = Persistence.save(State, true)
+    State.stock.wood, State.stock.food = 0, 0
+    Buildings.clear()
+    Walls.clear()
+    Villagers.clear()
+    Nodes.list = {}
+    print(("[save] wrote=%s before: b=%d wood=%d couples=%d y=%d m=%d villagers=%d nodes=%d")
+      :format(tostring(ok), b.buildings, b.wood, b.couples, b.year, b.month, b.villagers, b.nodes))
+    State.saveAction = nil
+  elseif State.saveAction == nil and not State._saveDone then
+    State._saveDone = true
+    local ok = Persistence.load(State)
+    local a = {
+      buildings = Buildings.n, wood = State.stock.wood, couples = #Villagers.couples,
+      year = State.waves.calendar.year, month = State.waves.calendar.month,
+      villagers = #Villagers.list, nodes = #Nodes.list,
+    }
+    local b = State._saveBefore
+    local match = ok and a.buildings == b.buildings and a.wood == b.wood and a.couples == b.couples
+      and a.year == b.year and a.month == b.month and a.villagers == b.villagers and a.nodes == b.nodes
+    print(("[save] loaded=%s after: b=%d wood=%d couples=%d y=%d m=%d villagers=%d nodes=%d match=%s")
+      :format(tostring(ok), a.buildings, a.wood, a.couples, a.year, a.month, a.villagers, a.nodes, tostring(match)))
+    love.event.quit()
+    State.save = nil
+  end
+  if State.save and State.save <= 0 then
+    love.event.quit()
+    State.save = nil
+  end
+end
+
 function State.update(dt)
   if State.smoke then
     State.smoke = State.smoke - 1
@@ -268,8 +450,10 @@ function State.update(dt)
       print("[smoke] wave skipped, 2 towers placed + staffed")
     end
     if State.smoke <= 0 then
-      print(("[smoke] done: mode=%s wave=%s phase=%s villageHp=%d buildings=%d villagers=%d enemiesAlive=%d")
-        :format(State.mode, State.waves.number, State.waves.phase, State.village.hp, Buildings.n, Villagers.count(), Enemies.n))
+      local doneN, totalN = Checklist.doneCount()
+      print(("[smoke] done: mode=%s wave=%s phase=%s date=y%d:m%d villageHp=%d buildings=%d villagers=%d enemiesAlive=%d customs=%d/%d")
+        :format(State.mode, State.waves.number, State.waves.phase, State.waves.calendar.year, State.waves.calendar.month,
+          State.village.hp, Buildings.n, Villagers.count(), Enemies.n, doneN, totalN))
       love.event.quit()
       State.smoke = nil
       return
@@ -290,6 +474,21 @@ function State.update(dt)
     testUpdate()
     if not State.test or State.test <= 0 then return end
   end
+  if State.life then
+    State.life = State.life - 1
+    lifeUpdate()
+    if not State.life then return end
+  end
+  if State.shot then
+    State.shot = State.shot - 1
+    shotUpdate()
+    if not State.shot then return end
+  end
+  if State.save then
+    State.save = State.save - 1
+    saveUpdate()
+    if not State.save then return end
+  end
   if State.mode ~= "playing" then return end
   local stepT0 = love.timer.getTime()
   State.hash:rebuild(Enemies)
@@ -297,8 +496,10 @@ function State.update(dt)
   Enemies.update(dt, State)
   Towers.update(dt, State.hash, Projectiles)
   Projectiles.update(dt, State.hash)
+  EnemyShots.update(dt, State)
   Enemies.compact()
   Villagers.update(dt, State)
+  Checklist.update(dt, State)
   Nodes.update(dt)
   Walls.update(dt)
   Buildings.update(dt)
@@ -310,28 +511,61 @@ function State.update(dt)
       State.selection = nil
     end
   end
+  Particles.update(dt)
+  if State.flash > 0 then State.flash = math.max(0, State.flash - dt * 1.6) end
+  if State._prevHp and State.village.hp < State._prevHp then
+    Camera.shake(5, 0.3)
+    State.flash = math.min(0.55, State.flash + 0.35)
+  end
+  State._prevHp = State.village.hp
+  if not State.harness and State.mode == "playing" then
+    local cal = State.waves.calendar
+    if cal.year > State._savedYear then State._pendingSave = true end
+    State._savedYear = cal.year
+    if State._pendingSave and State.waves.phase == "village" and Persistence.save(State) then
+      State._pendingSave = false
+      Checklist.notice("THE CULT ENDURES", "progress carved into the dark")
+    end
+  end
   local stepMs = (love.timer.getTime() - stepT0) * 1000
   State.stats.stepMs = State.stats.stepMs * 0.95 + stepMs * 0.05
-  if State.village.hp <= 0 then State.mode = "gameover" end
+  if State.village.hp <= 0 then
+    State.ending = "fallen"
+    State.mode = "gameover"
+  elseif Villagers.failReason then
+    State.ending = Villagers.failReason
+    State.mode = "gameover"
+  elseif Villagers.count() == 0 and Villagers.deaths > 0 then
+    State.ending = "extinct"
+    State.mode = "gameover"
+  elseif Checklist.isDone("stars_right") and not Villagers.conceived
+    and (Villagers.aliveAdults("m") == 0 or Villagers.aliveAdults("f") == 0) then
+    State.ending = "no_vessel"
+    State.mode = "gameover"
+  end
 end
 
 function State.tryPlace(mx, my)
   if State.mode ~= "playing" or not State.buildMode then return end
   local wx, wy = Camera.toWorld(mx, my)
   local gx, gy = Grid.worldToTile(wx, wy)
+  local placed = false
   if State.buildType == "wall" then
     local d = buildingData.wall
     if State.canAfford(d.cost) and Walls.canPlace(gx, gy) then
       pay(d.cost)
       Walls.place(gx, gy)
+      placed = true
     end
   else
     local d = buildingData[State.buildType]
-    if d and State.canAfford(d.cost) and Buildings.canPlace(gx, gy, State.village) then
+    if d and Checklist.canBuild(State.buildType) and State.canAfford(d.cost) and Buildings.canPlace(gx, gy, State.village) then
       pay(d.cost)
       Buildings.place(gx, gy, State.buildType, false)
+      placed = true
     end
   end
+  Audio.play(placed and "place" or "error")
 end
 
 function State.setBuildType(t)
@@ -340,7 +574,8 @@ function State.setBuildType(t)
 end
 
 function State.draw()
-  local panned = Camera.updateKeyboard(1 / 60)
+  local panned = false
+  if not State.paused then panned = Camera.updateKeyboard(1 / 60) end
   if panned then State.follow = false end
   if State.follow and State.selection and State.selection.villager then
     local v = State.selection.villager
@@ -348,10 +583,14 @@ function State.draw()
     Camera.y = Camera.y + (v.y - Camera.y) * 0.08
     Camera.clamp()
   end
+  Camera.updateShake(love.timer.getDelta())
   Camera.apply()
   Render.draw(State)
   Camera.unapply()
   UI.draw(State)
+  if State.shot and State.shot == 1 then
+    love.graphics.captureScreenshot("shot.png")
+  end
 end
 
 function State.handleClick(x, y)

@@ -1,11 +1,52 @@
 local Grid = require("src.sim.grid")
 
-local Camera = { x = 0, y = 0, zoom = 1, minZoom = 0.4, maxZoom = 2.5 }
+local Camera = {
+  x = 0, y = 0, zoom = 1, minZoom = 0.4, maxZoom = 2.5,
+  shakeAmt = 0, shakeT = 0, shakeDur = 0, shakeX = 0, shakeY = 0,
+  shakeEnabled = true,
+}
+
+function Camera.setShakeEnabled(v)
+  Camera.shakeEnabled = v and true or false
+  if not Camera.shakeEnabled then
+    Camera.shakeAmt = 0
+    Camera.shakeT = 0
+    Camera.shakeX, Camera.shakeY = 0, 0
+  end
+end
 
 function Camera.reset()
   Camera.x = Grid.pixelWidth() / 2
   Camera.y = Grid.pixelHeight() / 2
   Camera.zoom = 1
+  Camera.shakeAmt = 0
+  Camera.shakeT = 0
+  Camera.shakeX = 0
+  Camera.shakeY = 0
+end
+
+-- Request a screen shake; keeps the strongest active impulse.
+function Camera.shake(amount, duration)
+  if not Camera.shakeEnabled then return end
+  if amount > Camera.shakeAmt then Camera.shakeAmt = amount end
+  Camera.shakeDur = math.max(Camera.shakeDur, duration or 0.35)
+  Camera.shakeT = Camera.shakeDur
+end
+
+function Camera.updateShake(dt)
+  if Camera.shakeT <= 0 then
+    Camera.shakeX, Camera.shakeY = 0, 0
+    return
+  end
+  Camera.shakeT = Camera.shakeT - dt
+  local k = math.max(0, Camera.shakeT / Camera.shakeDur)
+  local a = Camera.shakeAmt * k * k
+  Camera.shakeX = (love.math.random() * 2 - 1) * a
+  Camera.shakeY = (love.math.random() * 2 - 1) * a
+  if Camera.shakeT <= 0 then
+    Camera.shakeAmt = 0
+    Camera.shakeX, Camera.shakeY = 0, 0
+  end
 end
 
 function Camera.toWorld(mx, my)
@@ -56,7 +97,7 @@ function Camera.apply()
   love.graphics.push()
   love.graphics.translate(love.graphics.getWidth() / 2, love.graphics.getHeight() / 2)
   love.graphics.scale(Camera.zoom)
-  love.graphics.translate(-Camera.x, -Camera.y)
+  love.graphics.translate(-Camera.x + Camera.shakeX, -Camera.y + Camera.shakeY)
 end
 
 function Camera.unapply()
