@@ -1,5 +1,5 @@
 return {
-  startFamilies = 2,
+  startFamilies = 3,
   speed = 55,
   hp = 20,
   r = 5,
