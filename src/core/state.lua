@@ -10,6 +10,9 @@ local Walls = require("src.sim.walls")
 local Buildings = require("src.sim.buildings")
 local Villagers = require("src.sim.villagers")
 local Checklist = require("src.sim.checklist")
+local Ages = require("src.sim.ages")
+local Research = require("src.sim.research")
+local Stats = require("src.sim.stats")
 local Nodes = require("src.sim.nodes")
 local Flow = require("src.sim.flowfield")
 local Camera = require("src.core.camera")
@@ -83,6 +86,7 @@ function State.reset()
   State.mode = "playing"
   State.buildMode = false
   State.buildType = "arrow_tower"
+  State.buildCategory = "defense"
   State.debug = false
   State.accumulator = 0
   State.selection = nil
@@ -90,6 +94,7 @@ function State.reset()
   State.checklistVisible = true
   Grid.resetOccupancy()
   Particles.clear()
+  Stats.reset()
   State.flash = 0
   State._prevHp = nil
   State.hash = SpatialHash.new(Grid.TILE)
@@ -105,6 +110,7 @@ function State.reset()
     wood = resData.starting.wood,
     food = resData.starting.food,
     stone = resData.starting.stone,
+    bone = resData.starting.bone or 0,
   }
   State.village = Village.new(Grid.pixelWidth() / 2, Grid.pixelHeight() / 2)
   State.enemies = Enemies
@@ -119,8 +125,29 @@ function State.reset()
   State.waves = Waves.new()
   State.checklist = Checklist
   Checklist.reset()
+  Ages.reset()
+  Research.reset()
   Villagers.onSacrificed = function()
     Checklist.sacrifices = Checklist.sacrifices + 1
+  end
+  Villagers.onHeartSacrifice = function(v)
+    if v and v.ritual == "heal" then
+      local d = buildingData.village_center
+      State.village.hp = math.min(State.village.maxHp, State.village.hp + (d.sacrificeHeal or 40))
+      Checklist.notice("THE HEART ENDURES", "+" .. (d.sacrificeHeal or 40) .. " hp")
+    else
+      Ages.onVictim(State)
+    end
+  end
+  Villagers.onDeath = function()
+    if not Buildings.hasRole("graveyard") then return end
+    State.stock.bone = (State.stock.bone or 0) + (buildingData.graveyard.bonesPerDeath or 0)
+    for i = 1, Buildings.n do
+      if Buildings.kind[i] == "graveyard" and Buildings.built[i] then
+        Buildings.graves[i] = (Buildings.graves[i] or 0) + 1
+        break
+      end
+    end
   end
   Villagers.onNotice = function(text, sub)
     Checklist.notice(text, sub)
@@ -134,8 +161,15 @@ function State.reset()
   local rebake = function() Flow.rebake(State.villageCells) end
   Walls.setRebuildHook(rebake)
   Buildings.setRebuildHook(rebake)
-  Buildings.setRemoveHook(function(destroyed, movedFrom, movedTo)
+  Buildings.setRemoveHook(function(destroyed, movedFrom, movedTo, wx, wy)
     Villagers.onBuildingRemoved(destroyed, movedFrom, movedTo)
+    if wx then Nodes.removeAt(wx, wy) end
+  end)
+  Buildings.setBuiltHook(function(i)
+    local d = buildingData[Buildings.kind[i]]
+    if d and d.role == "farm" and d.food then
+      Nodes.add(d.food, Buildings.x[i], Buildings.y[i])
+    end
   end)
   Flow.rebake(State.villageCells)
   Nodes.generate(State.village)
@@ -155,6 +189,31 @@ function State.reset()
   elseif love.filesystem.getInfo("save.flag") then
     State.save = 400
     State.saveAction = 340
+  elseif love.filesystem.getInfo("content.flag") then
+    State.content = 10
+  elseif love.filesystem.getInfo("ages.flag") then
+    State.ages = 600
+    State.agesAction = 540
+    State.agesDone = false
+  elseif love.filesystem.getInfo("research.flag") then
+    State.research = 900
+    State.researchAction = 840
+    State.researchDone = false
+    State.researchSchool = nil
+  elseif love.filesystem.getInfo("farm.flag") then
+    State.farm = 5
+    State.farmAction = 3
+  elseif love.filesystem.getInfo("grave.flag") then
+    State.grave = 40
+    State.graveAction = 30
+  elseif love.filesystem.getInfo("war.flag") then
+    State.war = 700
+    State.warAction = 640
+    State.warPhase = "setup"
+    State.warMob, State.warHealOk, State.warConfOk = false, false, false
+  elseif love.filesystem.getInfo("assign.flag") then
+    State.assign = 20
+    State.assignAction = 10
   elseif love.filesystem.getInfo("smoke.flag") then
     State.smoke = 2600
     State.smokeAction = 2570
@@ -177,7 +236,7 @@ function State.reset()
     State.lifePhase = "setup"
     State.lifeGestate = nil
   end
-  State.harness = (State.smoke or State.stress or State.stress2 or State.test or State.life or State.menu or State.shot or State.save) and true or false
+  State.harness = (State.smoke or State.stress or State.stress2 or State.test or State.life or State.menu or State.shot or State.save or State.content or State.ages or State.research or State.farm or State.grave or State.war or State.assign) and true or false
   State.paused = false
   State._savedYear = State.waves.calendar.year
   State._pendingSave = false
@@ -307,12 +366,7 @@ local function lifeUpdate()
     local okA = Villagers.bindCouple(houseA)
     local okB = Villagers.bindCouple(houseB)
     Villagers.choose(houseA)
-    local cB = Villagers.coupleAt(houseB)
-    if cB then
-      cB.pending = true
-      Villagers.request = cB
-      Villagers.allowBirth()
-    end
+    Villagers.makeChild(houseB, State)
     local conc = Villagers.startConception(altar)
     print(("[life] setup: coupleA=%s coupleB=%s conceive=%s"):format(tostring(okA), tostring(okB), tostring(conc)))
     State.lifePhase = "walk"
@@ -353,9 +407,10 @@ local function shotUpdate()
     end
     local tw = place(3, 0, "arrow_tower")
     local ba = place(-3, 0, "ballista")
-    place(0, 4, "house")
+    local house = place(0, 4, "house")
     place(5, 3, "house")
     place(0, -3, "altar")
+    place(4, -4, "farm")
     if tw > 0 then Villagers.assignCrew(tw) end
     if ba > 0 then Villagers.assignCrew(ba) end
     for gx = -3, 3 do
@@ -371,6 +426,17 @@ local function shotUpdate()
     Camera.x = v.x + 120
     Camera.y = v.y - 40
     Camera.clamp()
+    -- showcase the house (couple / Make a child) panel + hidden locked tabs
+    Checklist.load({ "first_union", "prove_flock", "flock_grows" }, 0, 0)
+    Ages.load(1)
+    State.stock.wood, State.stock.stone, State.stock.bone, State.stock.food = 300, 300, 60, 120
+    place(-4, 4, "graveyard")
+    if house > 0 then
+      Villagers.bindCouple(house)
+      State.selection = { building = house }
+    else
+      State.selection = { heart = true }
+    end
     State.shotAction = nil
   end
   if State.shot and State.shot <= 40 then State.flash = 0 end
@@ -431,6 +497,283 @@ local function saveUpdate()
   end
 end
 
+local function contentUpdate()
+  if State.content ~= 8 then return end
+  local buildingData = require("src.data.buildings")
+  local ageData = require("src.data.ages")
+  local entries = require("src.data.checklist")
+  local ageId = {}
+  for i = 1, #ageData do ageId[ageData[i].id] = true end
+  local problems, count = 0, 0
+  for kind, d in pairs(buildingData) do
+    count = count + 1
+    if d.role ~= "heart" then
+      if not d.name then print("[content] missing name: " .. kind); problems = problems + 1 end
+      if not d.role then print("[content] missing role: " .. kind); problems = problems + 1 end
+      if not d.render then print("[content] missing render: " .. kind); problems = problems + 1 end
+      if d.buildable ~= false and d.cost and not d.order then print("[content] buildable missing order: " .. kind); problems = problems + 1 end
+      if d.upgradeTo and not buildingData[d.upgradeTo.kind] then print("[content] bad upgradeTo: " .. kind); problems = problems + 1 end
+      if d.age and not ageId[d.age] then print("[content] bad age: " .. kind .. " -> " .. tostring(d.age)); problems = problems + 1 end
+    end
+  end
+  for i = 1, #entries do
+    if entries[i].age and not ageId[entries[i].age] then
+      print("[content] bad custom age: " .. entries[i].id .. " -> " .. tostring(entries[i].age)); problems = problems + 1
+    end
+  end
+  local researchData = require("src.data.research")
+  local rcount = 0
+  for id, r in pairs(researchData) do
+    rcount = rcount + 1
+    if not r.name then print("[content] research missing name: " .. id); problems = problems + 1 end
+    if r.age and not ageId[r.age] then print("[content] research bad age: " .. id); problems = problems + 1 end
+    if not r.effect then print("[content] research missing effect: " .. id); problems = problems + 1 end
+  end
+  print(("[content] research=%d"):format(rcount))
+  local order = Buildings.buildOrder()
+  local names = {}
+  for _, e in ipairs(order) do names[#names + 1] = e.kind end
+  print(("[content] buildings=%d buildable=%d ages=%d order=%s problems=%d")
+    :format(count, #order, #ageData, table.concat(names, ","), problems))
+  love.event.quit()
+  State.content = nil
+end
+
+local function agesUpdate()
+  if State.agesAction and State.ages == State.agesAction then
+    State.village.hp, State.village.maxHp = 1e9, 1e9
+    State.stock.wood, State.stock.stone = 500, 500
+    Checklist.load({ "first_union", "prove_flock", "flock_grows" }, 0, 0)
+    local ok = Ages.ascend(State)
+    print(("[ages] ascend=%s from=%s objectives=%s idleAdults=%d")
+      :format(tostring(ok), Ages.age().name, tostring(Ages.objectivesDone("whispers")), Villagers.idleAdults()))
+    State.agesAction = nil
+  end
+  if not State.agesDone and Ages.reached("blood") then
+    State.agesDone = true
+    print(("[ages] done: age=%d name=%s ballistaUnlocked=%s lockLabel=%s")
+      :format(Ages.current, Ages.age().name, tostring(Ages.unlocked("ballista")), tostring(Ages.lockLabel("ballista"))))
+    love.event.quit()
+    State.ages = nil
+  elseif State.ages and State.ages <= 0 then
+    if not State.agesDone then
+      print(("[ages] FAIL: age=%d ascending=%s (ascension did not complete)")
+        :format(Ages.current, tostring(Ages.ascending)))
+    end
+    love.event.quit()
+    State.ages = nil
+  end
+end
+
+local function researchUpdate()
+  if State.researchAction and State.research == State.researchAction then
+    State.village.hp, State.village.maxHp = 1e9, 1e9
+    State.stock.wood, State.stock.stone = 500, 500
+    Ages.load(2) -- Blood: research becomes available
+    local gx, gy = Grid.worldToTile(State.village.x + 4 * Grid.TILE, State.village.y)
+    local school = Buildings.place(gx, gy, "school", true)
+    local a1 = Villagers.assignResearcher(school)
+    local a2 = Villagers.assignResearcher(school)
+    local ok = Research.start(State, school, "sharp_bolts")
+    print(("[research] school=%d assign=%s,%s start=%s researchers=%d")
+      :format(school, tostring(a1), tostring(a2), tostring(ok), Buildings.researchers[school] or 0))
+    State.researchSchool = school
+    State.researchAction = nil
+  end
+  if not State.researchDone and Research.has("sharp_bolts") then
+    State.researchDone = true
+    print(("[research] done: purchased=%s towerDamageMul=%.2f")
+      :format(tostring(Research.has("sharp_bolts")), Stats.value("towerDamage")))
+    love.event.quit()
+    State.research = nil
+  elseif State.research and State.research <= 0 then
+    if not State.researchDone then
+      print(("[research] FAIL: project=%s progress=%.1f"):format(
+        tostring(State.researchSchool and Buildings.project[State.researchSchool]),
+        State.researchSchool and Buildings.rprogress[State.researchSchool] or 0))
+    end
+    love.event.quit()
+    State.research = nil
+  end
+end
+
+local function nodesAt(x, y)
+  local c = 0
+  for i = 1, #Nodes.list do
+    local nd = Nodes.list[i]
+    if nd.x == x and nd.y == y then c = c + 1 end
+  end
+  return c
+end
+
+local function farmUpdate()
+  if State.farmAction and State.farm == State.farmAction then
+    State.stock.wood = 500
+    local gx, gy = Grid.worldToTile(State.village.x + 5 * Grid.TILE, State.village.y + 5 * Grid.TILE)
+    local f = Buildings.place(gx, gy, "farm", true)
+    Buildings.emitBuilt(f)
+    local wx, wy = Buildings.x[f], Buildings.y[f]
+    local afterBuild = nodesAt(wx, wy)
+    Buildings.damage(f, 1e9)
+    local afterDestroy = nodesAt(wx, wy)
+    print(("[farm] built nodeAtTile=%d  destroyed nodeAtTile=%d  pass=%s")
+      :format(afterBuild, afterDestroy, tostring(afterBuild == 1 and afterDestroy == 0)))
+    love.event.quit()
+    State.farm = nil
+  end
+  if State.farm and State.farm <= 0 then
+    love.event.quit()
+    State.farm = nil
+  end
+end
+
+local function undeadCount()
+  local c = 0
+  for i = 1, #Villagers.list do
+    local v = Villagers.list[i]
+    if not v.dead and v.undead then c = c + 1 end
+  end
+  return c
+end
+
+local function graveUpdate()
+  if State.graveAction and State.grave == State.graveAction then
+    State.stock.wood, State.stock.stone, State.stock.bone = 500, 500, 0
+    local gx, gy = Grid.worldToTile(State.village.x - 5 * Grid.TILE, State.village.y + 5 * Grid.TILE)
+    local g = Buildings.place(gx, gy, "graveyard", true)
+    local before = State.stock.bone
+    local victim
+    for i = 1, #Villagers.list do
+      local v = Villagers.list[i]
+      if not v.dead and not v.undead then victim = v break end
+    end
+    if victim then Villagers.kill(victim) end
+    local afterDeath = State.stock.bone
+    local graves = Buildings.graves[g] or 0
+    State.stock.bone = 100
+    local u0 = undeadCount()
+    Villagers.spawnUndead(Buildings.x[g], Buildings.y[g])
+    local u1 = undeadCount()
+    local pass = afterDeath == (buildingData.graveyard.bonesPerDeath or 0) and graves == 1 and u1 == u0 + 1
+    print(("[grave] graveyard=%d bones %d->%d graves=%d undead %d->%d pass=%s")
+      :format(g, before, afterDeath, graves, u0, u1, tostring(pass)))
+    love.event.quit()
+    State.grave = nil
+  end
+  if State.grave and State.grave <= 0 then
+    love.event.quit()
+    State.grave = nil
+  end
+end
+
+local function countJob(job)
+  local c = 0
+  for i = 1, #Villagers.list do
+    local v = Villagers.list[i]
+    if not v.dead and v.job == job then c = c + 1 end
+  end
+  return c
+end
+
+local function findConfined()
+  for i = 1, #Villagers.list do
+    local v = Villagers.list[i]
+    if not v.dead and v.confined then return v end
+  end
+  return nil
+end
+
+local function warUpdate()
+  if State.warAction and State.war == State.warAction then
+    State.stock.wood, State.stock.stone, State.stock.food = 800, 800, 800
+    local v = State.village
+    local tx, ty = Grid.worldToTile(v.x + 3 * Grid.TILE, v.y)
+    local tower = Buildings.place(tx, ty, "arrow_tower", true)
+    local hx, hy = Grid.worldToTile(v.x - 4 * Grid.TILE, v.y)
+    local house = Buildings.place(hx, hy, "house", true)
+    Villagers.bindCouple(house)
+    -- 1) mobilize: fill empty tower slots + shelter surplus, then restore
+    local before = Buildings.crewCount[tower] or 0
+    Villagers.mobilize()
+    local mob = Buildings.crewCount[tower] or 0
+    local shelter = countJob("shelter")
+    Villagers.demobilize()
+    local after = Buildings.crewCount[tower] or 0
+    local left = countJob("shelter") + countJob("home")
+    State.warMob = (before == 0 and mob == 1 and shelter >= 1 and after == 0 and left == 0)
+    -- 2) heart heal via sacrifice
+    v.hp = v.maxHp - 200
+    State.warHealBase = v.hp
+    local victim = Villagers.pickHeartSacrifice()
+    if victim then Villagers.startHeartSacrifice(victim, "heal") end
+    -- 3) confinement: start a pregnancy, jump it to the second half
+    local c = Villagers.coupleAt(house)
+    if c then
+      Villagers.makeChild(house, State)
+      c.monthsLeft = math.floor((vData.pregnancyMonths or 9) / 2) + 1
+    end
+    State.waves.calendar.epoch = State.waves.calendar.epoch + 1
+    State.warPhase = "wait"
+    State.warAction = nil
+  end
+  if State.warPhase == "wait" then
+    if not State.warHealOk and State.village.hp > (State.warHealBase or 0) then State.warHealOk = true end
+    if not State.warConfOk and findConfined() then State.warConfOk = true end
+    if State.warHealOk and State.warConfOk then
+      print(("[war] mobilize=%s heal=%s confine=%s")
+        :format(tostring(State.warMob), tostring(State.warHealOk), tostring(State.warConfOk)))
+      love.event.quit()
+      State.war = nil
+    end
+  end
+  if State.war and State.war <= 0 then
+    print(("[war] TIMEOUT mobilize=%s heal=%s confine=%s")
+      :format(tostring(State.warMob), tostring(State.warHealOk), tostring(State.warConfOk)))
+    love.event.quit()
+    State.war = nil
+  end
+end
+
+local function assignUpdate()
+  if not (State.assignAction and State.assign == State.assignAction) then return end
+  State.stock.wood, State.stock.stone, State.stock.food = 800, 800, 800
+  local v = State.village
+  local vv
+  for i = 1, #Villagers.list do
+    local x = Villagers.list[i]
+    if not x.dead and not x.undead then vv = x break end
+  end
+  local r = { node = false, tower = false, school = false, build = false }
+  local tree
+  for i = 1, #Nodes.list do
+    if Nodes.list[i].kind == "tree" then tree = Nodes.list[i] break end
+  end
+  if tree and vv then
+    r.node = State.assignTo(vv, tree.x, tree.y) and vv.job == "wood" and vv.node == tree
+  end
+  local tgx, tgy = Grid.worldToTile(v.x + 3 * Grid.TILE, v.y)
+  local tower = Buildings.place(tgx, tgy, "arrow_tower", true)
+  if vv then r.tower = State.assignTo(vv, Buildings.x[tower], Buildings.y[tower]) and vv.job == "crew" end
+  local sgx, sgy = Grid.worldToTile(v.x - 4 * Grid.TILE, v.y)
+  local school = Buildings.place(sgx, sgy, "school", true)
+  if vv then r.school = State.assignTo(vv, Buildings.x[school], Buildings.y[school]) and vv.job == "research" end
+  if vv then
+    State.selection = { villager = vv }
+    State.setBuildType("house")
+    local hgx, hgy = Grid.worldToTile(v.x, v.y + 5 * Grid.TILE)
+    local wx, wy = Grid.tileToWorld(hgx, hgy)
+    local mx = (wx - Camera.x) * Camera.zoom + love.graphics.getWidth() / 2
+    local my = (wy - Camera.y) * Camera.zoom + love.graphics.getHeight() / 2
+    State.tryPlace(mx, my)
+    local hb = Buildings.at(hgx, hgy)
+    r.build = hb > 0 and (not Buildings.built[hb]) and vv.buildTarget == hb and vv.job == "build"
+  end
+  print(("[assign] node=%s tower=%s school=%s build=%s"):format(
+    tostring(r.node), tostring(r.tower), tostring(r.school), tostring(r.build)))
+  love.event.quit()
+  State.assign = nil
+end
+
 function State.update(dt)
   if State.smoke then
     State.smoke = State.smoke - 1
@@ -489,6 +832,41 @@ function State.update(dt)
     saveUpdate()
     if not State.save then return end
   end
+  if State.content then
+    State.content = State.content - 1
+    contentUpdate()
+    if not State.content then return end
+  end
+  if State.ages then
+    State.ages = State.ages - 1
+    agesUpdate()
+    if not State.ages then return end
+  end
+  if State.research then
+    State.research = State.research - 1
+    researchUpdate()
+    if not State.research then return end
+  end
+  if State.farm then
+    State.farm = State.farm - 1
+    farmUpdate()
+    if not State.farm then return end
+  end
+  if State.grave then
+    State.grave = State.grave - 1
+    graveUpdate()
+    if not State.grave then return end
+  end
+  if State.war then
+    State.war = State.war - 1
+    warUpdate()
+    if not State.war then return end
+  end
+  if State.assign then
+    State.assign = State.assign - 1
+    assignUpdate()
+    if not State.assign then return end
+  end
   if State.mode ~= "playing" then return end
   local stepT0 = love.timer.getTime()
   State.hash:rebuild(Enemies)
@@ -499,6 +877,8 @@ function State.update(dt)
   EnemyShots.update(dt, State)
   Enemies.compact()
   Villagers.update(dt, State)
+  Ages.update(dt, State)
+  Research.update(dt, State)
   Checklist.update(dt, State)
   Nodes.update(dt)
   Walls.update(dt)
@@ -538,7 +918,7 @@ function State.update(dt)
   elseif Villagers.count() == 0 and Villagers.deaths > 0 then
     State.ending = "extinct"
     State.mode = "gameover"
-  elseif Checklist.isDone("stars_right") and not Villagers.conceived
+  elseif Ages.reached("end") and not Villagers.conceived
     and (Villagers.aliveAdults("m") == 0 or Villagers.aliveAdults("f") == 0) then
     State.ending = "no_vessel"
     State.mode = "gameover"
@@ -559,13 +939,48 @@ function State.tryPlace(mx, my)
     end
   else
     local d = buildingData[State.buildType]
-    if d and Checklist.canBuild(State.buildType) and State.canAfford(d.cost) and Buildings.canPlace(gx, gy, State.village) then
+    if d and Ages.unlocked(State.buildType) and State.canAfford(d.cost) and Buildings.canPlace(gx, gy, State.village) then
       pay(d.cost)
-      Buildings.place(gx, gy, State.buildType, false)
+      local bi = Buildings.place(gx, gy, State.buildType, false)
       placed = true
+      -- if a villager is selected, send them to build it
+      local sel = State.selection
+      if sel and sel.villager then Villagers.assignBuild(sel.villager, bi) end
     end
   end
   Audio.play(placed and "place" or "error")
+end
+
+-- Right-click targeting: assign the selected villager to whatever was clicked.
+function State.assignTo(v, wx, wy)
+  if not v or v.dead or v.confined or v.age == "child" then return false end
+  local gx, gy = Grid.worldToTile(wx, wy)
+  local b = Buildings.at(gx, gy)
+  if b == 0 then
+    for i = 1, Buildings.n do
+      local dx, dy = Buildings.x[i] - wx, Buildings.y[i] - wy
+      if dx * dx + dy * dy < 400 then b = i break end
+    end
+  end
+  if b > 0 then
+    local d = buildingData[Buildings.kind[b]]
+    if not Buildings.built[b] then return Villagers.assignBuild(v, b) end
+    if d.role == "tower" then return Villagers.assignCrewTo(b, v) end
+    if d.role == "research" then return Villagers.assignResearcherTo(b, v) end
+    if d.role == "farm" then
+      local node = Nodes.atWorld(Buildings.x[b], Buildings.y[b])
+      if node then return Villagers.assignNode(v, node) end
+    end
+    return false
+  end
+  for i = 1, #Nodes.list do
+    local nd = Nodes.list[i]
+    local dx, dy = nd.x - wx, nd.y - wy
+    if dx * dx + dy * dy < (nd.r + 6) * (nd.r + 6) then
+      return Villagers.assignNode(v, nd)
+    end
+  end
+  return false
 end
 
 function State.setBuildType(t)
@@ -587,6 +1002,7 @@ function State.draw()
   Camera.apply()
   Render.draw(State)
   Camera.unapply()
+  if State.shot then State.flash = 0 end -- keep harness screenshots clean
   UI.draw(State)
   if State.shot and State.shot == 1 then
     love.graphics.captureScreenshot("shot.png")

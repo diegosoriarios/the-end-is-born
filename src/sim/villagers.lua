@@ -7,10 +7,12 @@ local Buildings = require("src.sim.buildings")
 local Particles = require("src.fx.particles")
 local Camera = require("src.core.camera")
 local Audio = require("src.audio.audio")
+local Stats = require("src.sim.stats")
 
 local Villagers = {
-  list = {}, deaths = 0, onSacrificed = nil, onNotice = nil,
+  list = {}, deaths = 0, onSacrificed = nil, onNotice = nil, onHeartSacrifice = nil, onDeath = nil,
   couples = {}, request = nil, conceived = false, failReason = nil, seenEpoch = 0,
+  mobilized = false,
 }
 local nextId = 1
 local nextCouple = 1
@@ -25,22 +27,67 @@ local JOB_LABEL = {
   stone = "Gathering stone",
   build = "Building",
   crew = "Crewing defense",
+  research = "Researching",
+  shelter = "Sheltering",
+  home = "At home",
   sacrifice = "Walking to the altar",
   conceive = "Walking to the altar",
 }
 
 local slotOff = { { 20, 0 }, { -20, 0 }, { 0, 20 }, { 0, -20 } }
 
+-- Release a villager from a crew/research building slot (keeps counters in
+-- sync when their job changes or they're reassigned).
+local function unassignBuilding(v)
+  local b = v.building
+  if b and b <= Buildings.n then
+    if v.job == "crew" then
+      Buildings.crewCount[b] = math.max(0, (Buildings.crewCount[b] or 0) - 1)
+    elseif v.job == "research" then
+      Buildings.researchers[b] = math.max(0, (Buildings.researchers[b] or 0) - 1)
+    end
+  end
+  v.building = nil
+end
+
+-- Swords: probe the enemy hash for the nearest target in melee range.
+local probeE, probeX, probeY, probeBest, probeBestD = nil, 0, 0, 0, 0
+local function vprobe(j)
+  local dx = probeX - probeE.x[j]
+  local dy = probeY - probeE.y[j]
+  local d2 = dx * dx + dy * dy
+  if d2 < probeBestD and probeE.hp[j] > 0 then
+    probeBestD = d2
+    probeBest = j
+  end
+end
+
+-- Where a villager shelters / rests: their couple's house, else the heart.
+local function homePos(v, ctx)
+  if v.coupleId then
+    for i = 1, #Villagers.couples do
+      local c = Villagers.couples[i]
+      if c.id == v.coupleId and c.house and c.house <= Buildings.n then
+        return Buildings.x[c.house], Buildings.y[c.house]
+      end
+    end
+  end
+  return ctx.village.x, ctx.village.y
+end
+
 function Villagers.clear()
   Villagers.list = {}
   Villagers.deaths = 0
   Villagers.onSacrificed = nil
   Villagers.onNotice = nil
+  Villagers.onHeartSacrifice = nil
+  Villagers.onDeath = nil
   Villagers.couples = {}
   Villagers.request = nil
   Villagers.conceived = false
   Villagers.failReason = nil
   Villagers.seenEpoch = 0
+  Villagers.mobilized = false
   nextId = 1
   nextCouple = 1
 end
@@ -52,7 +99,6 @@ function Villagers.spawn(x, y, sex, family)
     sex = sex, family = family,
     hp = vData.hp, maxHp = vData.hp,
     r = vData.r,
-    hunger = 0,
     job = "idle",
     state = "idle",
     carry = 0, carryRes = nil,
@@ -62,7 +108,11 @@ function Villagers.spawn(x, y, sex, family)
     timer = love.math.random() * vData.wanderInterval,
     wx = x, wy = y,
     flash = 0,
+    atk = 0,
     dead = false,
+    undead = false,
+    confined = false,
+    mob = nil,
     age = "adult",
     growLeft = 0,
     coupleId = nil,
@@ -87,6 +137,8 @@ end
 
 function Villagers.damage(v, amount)
   if v.dead then return end
+  local armor = Stats.bonus("villagerArmor")
+  if armor > 0 then amount = amount / (1 + armor) end
   v.hp = v.hp - amount
   v.flash = 0.08
   Particles.blood(v.x, v.y, 1)
@@ -97,12 +149,22 @@ function Villagers.kill(v)
   if v.dead then return end
   v.dead = true
   v.hp = 0
-  Villagers.deaths = Villagers.deaths + 1
   Particles.blood(v.x, v.y, 6)
   Particles.decal(v.x, v.y, "bloodDark")
   Camera.shake(2, 0.2)
   Audio.play("squelch", { pitch = 0.85 })
+  if not v.undead then
+    Villagers.deaths = Villagers.deaths + 1
+    if Villagers.onDeath then Villagers.onDeath(v) end
+  end
   if v.coupleId then dissolveOnDeath(v) end
+end
+
+-- Raise a servant from the grave (Graveyard necromancy).
+function Villagers.spawnUndead(x, y)
+  local v = Villagers.spawn(x, y, love.math.random() < 0.5 and "m" or "f", 0)
+  v.undead = true
+  return v
 end
 
 local function move(v, tx, ty, dt, arriveDist)
@@ -179,7 +241,7 @@ local function updateGather(v, dt, ctx, res)
   if v.state == "toNode" then
     if move(v, node.x, node.y, dt, node.r + v.r + 4) then
       v.state = "gathering"
-      v.timer = resData.gatherInterval
+      v.timer = Stats.value("gatherSpeed") > 0 and (resData.gatherInterval / Stats.value("gatherSpeed")) or resData.gatherInterval
     end
   elseif v.state == "gathering" then
     v.timer = v.timer - dt
@@ -191,7 +253,7 @@ local function updateGather(v, dt, ctx, res)
         if v.carry >= cap then
           v.state = "toDepot"
         else
-          v.timer = resData.gatherInterval
+          v.timer = Stats.value("gatherSpeed") > 0 and (resData.gatherInterval / Stats.value("gatherSpeed")) or resData.gatherInterval
         end
       else
         v.node = nil
@@ -203,34 +265,62 @@ local function updateGather(v, dt, ctx, res)
 end
 
 local function updateVillager(v, dt, ctx)
-  v.hunger = math.min(150, v.hunger + vData.hungerRate * dt)
-  if v.hunger > vData.eatAt and ctx.stock.food >= 1 then
-    ctx.stock.food = ctx.stock.food - 1
-    v.hunger = v.hunger - vData.eatRelief
-  end
-  if v.hunger >= 100 then
-    v.hp = v.hp - vData.starveDps * dt
-  end
   if v.flash > 0 then v.flash = v.flash - dt end
   if v.hp <= 0 then
     Villagers.kill(v)
     return
   end
 
+  -- Pregnancy confinement: the mother stays home until the child is born.
+  if v.confined then
+    local hx, hy = homePos(v, ctx)
+    move(v, hx, hy, dt, 8)
+    v.state = "home"
+    return
+  end
+
+  -- Swords research: armed servants strike nearby foes.
+  if Stats.bonus("villagerDamage") > 0 and v.age ~= "child" then
+    v.atk = (v.atk or 0) - dt
+    if v.atk <= 0 and ctx.hash and ctx.enemies then
+      probeE = ctx.enemies
+      probeX, probeY = v.x, v.y
+      probeBest, probeBestD = 0, (v.r + 12) * (v.r + 12)
+      ctx.hash:queryCircle(v.x, v.y, v.r + 12, vprobe)
+      if probeBest > 0 then
+        ctx.enemies.damage(probeBest, 5 * Stats.value("villagerDamage"))
+        v.atk = 1.0
+        Particles.blood(v.x, v.y, 3)
+      end
+    end
+  end
+
   local job = v.job
   if job == "sacrifice" then
-    local b = v.altar
-    if not b or b > Buildings.n or Buildings.kind[b] ~= "altar" or not Buildings.built[b] then
-      v.job, v.state = "idle", "idle"
-      v.altar = nil
+    local tx, ty, valid = 0, 0, false
+    if v.altar == "heart" then
+      tx, ty, valid = ctx.village.x, ctx.village.y, true
+    else
+      local b = v.altar
+      valid = b and b <= Buildings.n and Buildings.kind[b] == "altar" and Buildings.built[b]
+      if valid then tx, ty = Buildings.x[b], Buildings.y[b] end
+    end
+    if not valid then
+      v.job, v.state, v.altar = "idle", "idle", nil
       return
     end
     local off = slotOff[(v.id % #slotOff) + 1]
-    if move(v, Buildings.x[b] + off[1], Buildings.y[b] + off[2], dt, 6) then
-      Particles.flame(Buildings.x[b], Buildings.y[b], 6)
+    if move(v, tx + off[1], ty + off[2], dt, 6) then
       Audio.play("sacrifice")
-      Villagers.kill(v)
-      if Villagers.onSacrificed then Villagers.onSacrificed(v) end
+      if v.altar == "heart" then
+        Particles.ritual(tx, ty)
+        Villagers.kill(v)
+        if Villagers.onHeartSacrifice then Villagers.onHeartSacrifice(v) end
+      else
+        Particles.flame(tx, ty, 6)
+        Villagers.kill(v)
+        if Villagers.onSacrificed then Villagers.onSacrificed(v) end
+      end
     end
     return
   end
@@ -246,6 +336,13 @@ local function updateVillager(v, dt, ctx)
     if move(v, Buildings.x[b] + off[1], Buildings.y[b] + off[2], dt, 6) then
       v.state = "arrived"
     end
+    return
+  end
+
+  if job == "shelter" then
+    local hx, hy = homePos(v, ctx)
+    move(v, hx, hy, dt, 8)
+    v.state = "sheltered"
     return
   end
 
@@ -270,6 +367,22 @@ local function updateVillager(v, dt, ctx)
     return
   end
 
+  if job == "research" then
+    local b = v.building
+    if not b or b > Buildings.n or Buildings.role[b] ~= "research" or not Buildings.built[b] then
+      unassignBuilding(v)
+      v.job, v.state = "idle", "idle"
+      return
+    end
+    if v.state ~= "researching" then
+      local off = slotOff[(v.id % #slotOff) + 1]
+      if move(v, Buildings.x[b] + off[1], Buildings.y[b] + off[2], dt, 6) then
+        v.state = "researching"
+      end
+    end
+    return
+  end
+
   if job == "build" then
     if v.buildTarget == 0 or v.buildTarget > Buildings.n or Buildings.built[v.buildTarget] then
       v.buildTarget = findBuildTarget(v)
@@ -281,13 +394,14 @@ local function updateVillager(v, dt, ctx)
     local b = v.buildTarget
     if move(v, Buildings.x[b], Buildings.y[b], dt, Grid.TILE * 0.9) then
       local d = buildingData[Buildings.kind[b]]
-      Buildings.progress[b] = Buildings.progress[b] + vData.buildRate * dt
+      Buildings.progress[b] = Buildings.progress[b] + vData.buildRate * Stats.value("buildSpeed") * dt
       if Buildings.progress[b] >= d.buildTime then
         Buildings.built[b] = true
         Buildings.progress[b] = d.buildTime
         v.buildTarget = 0
         Particles.dust(Buildings.x[b], Buildings.y[b], 10)
         Audio.play("build_done", { pitch = 1 + (love.math.random() - 0.5) * 0.1 })
+        Buildings.emitBuilt(b)
       end
     end
     return
@@ -311,7 +425,11 @@ function Villagers.update(dt, ctx)
     local v = list[i]
     if v.dead then
       if v.building and v.building <= Buildings.n then
-        Buildings.crewCount[v.building] = Buildings.crewCount[v.building] - 1
+        if v.job == "crew" then
+          Buildings.crewCount[v.building] = math.max(0, Buildings.crewCount[v.building] - 1)
+        elseif v.job == "research" then
+          Buildings.researchers[v.building] = math.max(0, (Buildings.researchers[v.building] or 0) - 1)
+        end
       end
     else
       w = w + 1
@@ -335,7 +453,7 @@ function Villagers.assignCrew(b)
   local list = Villagers.list
   for i = 1, #list do
     local v = list[i]
-    if not v.dead and v.age ~= "child" and v.job == "idle" then
+    if not v.dead and not v.confined and v.age ~= "child" and v.job == "idle" then
       pick = v
       break
     end
@@ -343,13 +461,15 @@ function Villagers.assignCrew(b)
   if not pick then
     for i = 1, #list do
       local v = list[i]
-      if not v.dead and v.age ~= "child" and v.job ~= "crew" and v.job ~= "sacrifice" and v.job ~= "conceive" then
+      if not v.dead and v.age ~= "child" and v.job ~= "crew" and v.job ~= "research"
+        and v.job ~= "sacrifice" and v.job ~= "conceive" then
         pick = v
         break
       end
     end
   end
   if not pick then return false end
+  unassignBuilding(pick)
   pick.job = "crew"
   pick.state = "walking"
   pick.building = b
@@ -357,6 +477,90 @@ function Villagers.assignCrew(b)
   pick.buildTarget = 0
   Buildings.crewCount[b] = Buildings.crewCount[b] + 1
   return true
+end
+
+function Villagers.assignResearcher(b)
+  local d = buildingData[Buildings.kind[b]]
+  local slots = d and d.researchSlots or 0
+  if (Buildings.researchers[b] or 0) >= slots then return false end
+  local pick
+  local list = Villagers.list
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead and not v.confined and v.age ~= "child" and v.job == "idle" then pick = v break end
+  end
+  if not pick then return false end
+  unassignBuilding(pick)
+  pick.job, pick.state = "research", "walking"
+  pick.building = b
+  pick.node = nil
+  pick.buildTarget = 0
+  Buildings.researchers[b] = (Buildings.researchers[b] or 0) + 1
+  return true
+end
+
+-- Assign a specific villager (used by right-click targeting).
+function Villagers.assignNode(v, node)
+  if not v or v.dead or v.confined or v.age == "child"
+    or v.job == "sacrifice" or v.job == "conceive" then return false end
+  if not node then return false end
+  unassignBuilding(v)
+  v.job = node.res
+  v.state = "toNode"
+  v.node = node
+  v.buildTarget = 0
+  v.altar = nil
+  return true
+end
+
+function Villagers.assignBuild(v, b)
+  if not v or v.dead or v.confined or v.age == "child"
+    or v.job == "sacrifice" or v.job == "conceive" then return false end
+  if not b or b > Buildings.n then return false end
+  unassignBuilding(v)
+  v.job, v.state = "build", "idle"
+  v.buildTarget = b
+  v.node, v.altar = nil, nil
+  return true
+end
+
+function Villagers.assignCrewTo(b, v)
+  if not v or v.dead or v.confined or v.age == "child" then return false end
+  if v.job == "crew" and v.building == b then return true end
+  if (Buildings.crewCount[b] or 0) >= (Buildings.maxCrew[b] or 0) then return false end
+  unassignBuilding(v)
+  v.job, v.state = "crew", "walking"
+  v.building = b
+  v.node, v.buildTarget = nil, 0
+  Buildings.crewCount[b] = (Buildings.crewCount[b] or 0) + 1
+  return true
+end
+
+function Villagers.assignResearcherTo(b, v)
+  if not v or v.dead or v.confined or v.age == "child" then return false end
+  if v.job == "research" and v.building == b then return true end
+  local d = buildingData[Buildings.kind[b]]
+  local slots = d and d.researchSlots or 0
+  if (Buildings.researchers[b] or 0) >= slots then return false end
+  unassignBuilding(v)
+  v.job, v.state = "research", "walking"
+  v.building = b
+  v.node, v.buildTarget = nil, 0
+  Buildings.researchers[b] = (Buildings.researchers[b] or 0) + 1
+  return true
+end
+
+function Villagers.unassignResearcher(b)
+  local list = Villagers.list
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead and v.job == "research" and v.building == b then
+      Buildings.researchers[b] = math.max(0, (Buildings.researchers[b] or 0) - 1)
+      v.job, v.state, v.building = "idle", "idle", nil
+      return true
+    end
+  end
+  return false
 end
 
 function Villagers.unassignCrew(b)
@@ -374,13 +578,16 @@ function Villagers.unassignCrew(b)
 end
 
 function Villagers.startSacrifice(v, b)
-  if not v or v.dead or v.age == "child" or v.job == "sacrifice" or v.job == "crew" or v.job == "conceive" then return false end
+  if not v or v.dead or v.confined or v.age == "child" or v.job == "sacrifice" or v.job == "crew"
+    or v.job == "research" or v.job == "conceive" then
+    return false
+  end
+  unassignBuilding(v)
   v.job = "sacrifice"
   v.state = "walking"
   v.altar = b
   v.node = nil
   v.buildTarget = 0
-  v.building = nil
   return true
 end
 
@@ -390,7 +597,8 @@ function Villagers.pickSacrifice(b)
   local pick, pd = nil, math.huge
   for i = 1, #list do
     local v = list[i]
-    if not v.dead and v.age ~= "child" and v.job ~= "sacrifice" and v.job ~= "crew" and v.job ~= "conceive" then
+    if not v.dead and not v.undead and not v.confined and v.age ~= "child" and v.job ~= "sacrifice" and v.job ~= "crew"
+      and v.job ~= "research" and v.job ~= "conceive" then
       local dx, dy = v.x - bx, v.y - by
       local d = dx * dx + dy * dy
       if v.job == "idle" then d = d - 10000 end
@@ -403,12 +611,94 @@ function Villagers.pickSacrifice(b)
   return pick
 end
 
-function Villagers.setJob(v, job)
-  if not v or v.age == "child" then return end
-  if v.job == "crew" and job ~= "crew" then
-    Buildings.crewCount[v.building] = Buildings.crewCount[v.building] - 1
-    v.building = nil
+-- A servant walks to the village heart and dies there. `purpose` is
+-- "ascend" (default) or "heal".
+function Villagers.startHeartSacrifice(v, purpose)
+  if not v or v.dead or v.confined or v.age == "child" or v.job == "crew" or v.job == "research"
+    or v.job == "conceive" or v.job == "sacrifice" then
+    return false
   end
+  unassignBuilding(v)
+  v.job, v.state = "sacrifice", "walking"
+  v.altar = "heart"
+  v.ritual = purpose or "ascend"
+  v.node = nil
+  v.buildTarget = 0
+  return true
+end
+
+function Villagers.pickHeartSacrifice()
+  local list = Villagers.list
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead and not v.undead and not v.confined and v.age ~= "child" and v.job == "idle" then return v end
+  end
+  return nil
+end
+
+function Villagers.idleAdults()
+  local c = 0
+  local list = Villagers.list
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead and not v.undead and not v.confined and v.age ~= "child" and v.job == "idle" then c = c + 1 end
+  end
+  return c
+end
+
+-- Mobilize everyone for a horde: fill empty tower slots (kept manual crew),
+-- everyone else shelters at home. Jobs are restored on demobilize.
+function Villagers.mobilize()
+  if Villagers.mobilized then return end
+  Villagers.mobilized = true
+  local list = Villagers.list
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead and not v.confined and v.age ~= "child"
+      and v.job ~= "sacrifice" and v.job ~= "conceive" then
+      v.mob = { job = v.job, state = v.state, building = v.building, altar = v.altar, buildTarget = v.buildTarget }
+    end
+  end
+  for b = 1, Buildings.n do
+    if Buildings.isTower[b] and Buildings.built[b] then
+      while Buildings.crewCount[b] < Buildings.maxCrew[b] do
+        if not Villagers.assignCrew(b) then break end
+      end
+    end
+  end
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead and v.mob and v.job ~= "crew" and v.job ~= "sacrifice" and v.job ~= "conceive" then
+      unassignBuilding(v)
+      v.job, v.state = "shelter", "walking"
+      v.node, v.buildTarget, v.altar = nil, 0, nil
+    end
+  end
+end
+
+function Villagers.demobilize()
+  if not Villagers.mobilized then return end
+  Villagers.mobilized = false
+  local list = Villagers.list
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead and v.mob then
+      local m = v.mob
+      v.mob = nil
+      if v.job == "crew" and m.job ~= "crew" then unassignBuilding(v) end
+      v.job = m.job
+      v.state = m.state or "idle"
+      v.building = m.building
+      v.altar = m.altar
+      v.buildTarget = m.buildTarget or 0
+      v.node = nil
+    end
+  end
+end
+
+function Villagers.setJob(v, job)
+  if not v or v.age == "child" or v.confined then return end
+  unassignBuilding(v)
   v.job = job
   v.state = "idle"
   v.node = nil
@@ -448,8 +738,12 @@ function Villagers.onBuildingRemoved(destroyed, movedFrom, movedTo)
   for i = #Villagers.couples, 1, -1 do
     local c = Villagers.couples[i]
     if c.house == destroyed then
-      if c.man then c.man.coupleId = nil end
-      if c.woman then c.woman.coupleId = nil end
+      for _, p in ipairs({ c.man, c.woman }) do
+        if p then
+          p.coupleId = nil
+          if p.confined then p.confined = false p.job, p.state = "idle", "idle" end
+        end
+      end
       if Villagers.request == c then Villagers.request = nil end
       table.remove(Villagers.couples, i)
     end
@@ -467,7 +761,18 @@ function Villagers.aliveAdults(sex)
   local list = Villagers.list
   for i = 1, #list do
     local v = list[i]
-    if not v.dead and v.age ~= "child" and (not sex or v.sex == sex) then n = n + 1 end
+    if not v.dead and not v.undead and v.age ~= "child" and (not sex or v.sex == sex) then n = n + 1 end
+  end
+  return n
+end
+
+-- Living (non-undead) servants — the population that needs housing.
+function Villagers.population()
+  local n = 0
+  local list = Villagers.list
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead and not v.undead then n = n + 1 end
   end
   return n
 end
@@ -492,7 +797,7 @@ function Villagers.freeAdult(sex)
   local list = Villagers.list
   for i = 1, #list do
     local v = list[i]
-    if not v.dead and v.age ~= "child" and v.sex == sex and not v.coupleId then return v end
+    if not v.dead and not v.undead and v.age ~= "child" and v.sex == sex and not v.coupleId then return v end
   end
   return nil
 end
@@ -532,9 +837,19 @@ end
 function Villagers.choose(house)
   local c = Villagers.coupleAt(house)
   if not c then return false end
+  if c.conceived or c.conceiving then return false end
   for i = 1, #Villagers.couples do Villagers.couples[i].chosen = false end
   c.chosen = true
   if Villagers.onNotice then Villagers.onNotice("The vessel is chosen", "conceive the Antichrist at the Altar") end
+  return true
+end
+
+function Villagers.unchoose(house)
+  local c = Villagers.coupleAt(house)
+  if not c then return false end
+  if c.conceived or c.conceiving then return false end
+  c.chosen = false
+  if Villagers.onNotice then Villagers.onNotice("The vessel is released", nil) end
   return true
 end
 
@@ -557,10 +872,7 @@ function Villagers.startConception(b)
   if not c or c.conceived or c.conceiving then return false end
   if not personAlive(c.man) or not personAlive(c.woman) then return false end
   local function walk(v)
-    if v.job == "crew" and v.building then
-      Buildings.crewCount[v.building] = Buildings.crewCount[v.building] - 1
-      v.building = nil
-    end
+    unassignBuilding(v)
     v.job, v.state = "conceive", "walking"
     v.altar = b
     v.node = nil
@@ -573,24 +885,21 @@ function Villagers.startConception(b)
   return true
 end
 
--- Birth approval (normal children).
-function Villagers.allowBirth()
-  local c = Villagers.request
-  if not c then return false end
-  c.pending = false
+-- Manual birth: the player starts a pregnancy from the house panel. Costs
+-- food (Age-of-Empires style).
+function Villagers.makeChild(house, S)
+  local c = Villagers.coupleAt(house)
+  if not c or c.pregnant or c.conceived or c.conceiving then return false end
+  if not personAlive(c.man) or not personAlive(c.woman) then return false end
+  local cap = (S and S.buildings and S.buildings.popCap()) or 0
+  if Villagers.population() >= cap then return false end
+  local cost = vData.birthCost or 0
+  if S and (S.stock.food or 0) < cost then return false end
+  if S then S.stock.food = S.stock.food - cost end
   c.pregnant = true
   c.monthsLeft = vData.pregnancyMonths
-  Villagers.request = nil
-  if Villagers.onNotice then Villagers.onNotice("A child is conceived", nil) end
-  return true
-end
-
-function Villagers.denyBirth()
-  local c = Villagers.request
-  if not c then return false end
-  c.pending = false
-  c.askIn = vData.askEvery
-  Villagers.request = nil
+  if c.woman then c.woman.confined = false end
+  if Villagers.onNotice then Villagers.onNotice("A child is conceived", cost > 0 and (cost .. " food offered") or nil) end
   return true
 end
 
@@ -600,7 +909,13 @@ dissolveOnDeath = function(v)
     if c.id == v.coupleId then
       if c.conceived and (c.man == v or c.woman == v) then Villagers.failReason = "vessel" end
       local partner = (c.man == v) and c.woman or c.man
-      if partner then partner.coupleId = nil end
+      if partner then
+        partner.coupleId = nil
+        if partner.confined then
+          partner.confined = false
+          partner.job, partner.state = "idle", "idle"
+        end
+      end
       v.coupleId = nil
       if Villagers.request == c then Villagers.request = nil end
       table.remove(Villagers.couples, i)
@@ -669,13 +984,25 @@ advanceMonths = function(n, ctx)
     if not c.conceiving and personAlive(c.man) and personAlive(c.woman) then
       if c.pregnant then
         c.monthsLeft = c.monthsLeft - n
+        local half = math.floor((vData.pregnancyMonths or 9) / 2)
+        if c.woman and personAlive(c.woman) and c.monthsLeft <= half and not c.woman.confined then
+          -- second half: the mother drops everything and stays home
+          unassignBuilding(c.woman)
+          c.woman.confined = true
+          c.woman.job, c.woman.state = "home", "idle"
+          c.woman.node, c.woman.buildTarget = nil, 0
+        end
         if c.monthsLeft <= 0 then
+          if c.woman then
+            c.woman.confined = false
+            c.woman.job, c.woman.state = "idle", "idle"
+          end
           if c.conceived then
             c.pregnant = false
             ctx.ending = "birth"
             ctx.mode = "victory"
             Audio.play("birth")
-          elseif Villagers.count() < cap then
+          elseif Villagers.population() < cap then
             local baby = Villagers.spawn(ctx.village.x, ctx.village.y, love.math.random() < 0.5 and "m" or "f", 0)
             baby.age = "child"
             baby.growLeft = vData.growMonths
@@ -687,13 +1014,6 @@ advanceMonths = function(n, ctx)
           else
             c.monthsLeft = 1
           end
-        end
-      end
-      if not c.pregnant and not c.conceived then
-        c.askIn = c.askIn - n
-        if c.askIn <= 0 and not Villagers.request and Villagers.count() < cap then
-          c.pending = true
-          Villagers.request = c
         end
       end
     end
@@ -711,11 +1031,13 @@ function Villagers.load(vlist, clist, requestId, deaths, conceived, seenEpoch)
     local r = vlist[idx]
     local v = {
       id = r.id, x = r.x, y = r.y, sex = r.sex, family = r.family,
-      hp = r.hp, maxHp = r.maxHp, r = r.r, hunger = r.hunger,
+      hp = r.hp, maxHp = r.maxHp, r = r.r,
       job = r.job, state = r.state, carry = r.carry or 0, carryRes = r.carryRes,
       node = nil, buildTarget = r.buildTarget or 0, building = r.building, altar = r.altar,
       timer = r.timer or 0, wx = r.wx or r.x, wy = r.wy or r.y,
-      flash = 0, dead = false, age = r.age or "adult", growLeft = r.growLeft or 0,
+      flash = 0, atk = 0, dead = false, undead = r.undead or false,
+      confined = r.confined or false,
+      age = r.age or "adult", growLeft = r.growLeft or 0,
       coupleId = nil,
     }
     if r.nodeIndex and Nodes.list[r.nodeIndex] then v.node = Nodes.list[r.nodeIndex] end
@@ -746,6 +1068,22 @@ function Villagers.load(vlist, clist, requestId, deaths, conceived, seenEpoch)
   Villagers.conceived = conceived or false
   Villagers.failReason = nil
   Villagers.seenEpoch = seenEpoch or 0
+  -- recompute pregnancy confinement
+  local half = math.floor((vData.pregnancyMonths or 9) / 2)
+  for _, c in ipairs(Villagers.couples) do
+    if c.pregnant and c.monthsLeft and c.monthsLeft <= half and c.woman then
+      c.woman.confined = true
+      c.woman.job, c.woman.state = "home", "idle"
+    end
+  end
+  -- rebuild researcher counts from the restored villagers
+  for i = 1, Buildings.n do Buildings.researchers[i] = 0 end
+  for i = 1, #Villagers.list do
+    local v = Villagers.list[i]
+    if not v.dead and v.job == "research" and v.building and v.building <= Buildings.n then
+      Buildings.researchers[v.building] = (Buildings.researchers[v.building] or 0) + 1
+    end
+  end
 end
 
 return Villagers

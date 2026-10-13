@@ -2,6 +2,7 @@ local Grid = require("src.sim.grid")
 local buildingData = require("src.data.buildings")
 local Particles = require("src.fx.particles")
 local Camera = require("src.core.camera")
+local Stats = require("src.sim.stats")
 
 local Walls = { n = 0, gx = {}, gy = {}, hp = {}, maxHp = {}, flash = {} }
 
@@ -39,8 +40,9 @@ function Walls.place(gx, gy)
   local i = Walls.n
   Walls.gx[i] = gx
   Walls.gy[i] = gy
-  Walls.hp[i] = d.hp
-  Walls.maxHp[i] = d.hp
+  local hp = d.hp * Stats.value("wallHp")
+  Walls.hp[i] = hp
+  Walls.maxHp[i] = hp
   Walls.flash[i] = 0
   local c = Grid.cellIndex(gx, gy)
   index[c] = i

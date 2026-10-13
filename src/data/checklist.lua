@@ -1,43 +1,40 @@
 -- The Antichrist checklist. Ordered chain: an entry becomes visible only once
--- every id in `requires` is complete. `unlocks` are building kinds (or the
--- sentinel "rituals") granted on completion. `progress(S)` is optional and
+-- every id in `requires` is complete. `age` groups customs into an Age (its
+-- objectives); `unlocks` are display hints. `progress(S)` is optional and
 -- returns current, max for the HUD.
 local Buildings = require("src.sim.buildings")
 
 return {
   {
-    id = "first_union",
+    id = "first_union", age = "whispers",
     name = "The first union",
     desc = "Bind a couple to a house",
     condition = function(S) return S.villagers.coupleCount() >= 1 end,
     progress = function(S) return math.min(S.villagers.coupleCount(), 1), 1 end,
   },
   {
-    id = "prove_flock",
+    id = "prove_flock", age = "whispers",
     name = "Prove the flock",
     desc = "Survive the first horde",
-    unlocks = { "ballista" },
     condition = function(S) return S.waves.hordesSurvived >= 1 end,
     progress = function(S) return math.min(S.waves.hordesSurvived, 1), 1 end,
   },
   {
-    id = "flock_grows",
+    id = "flock_grows", age = "whispers",
     name = "The flock grows",
     desc = "Grow the village to 8 servants",
-    unlocks = { "altar" },
     condition = function(S) return S.villagers.count() >= 8 end,
     progress = function(S) return math.min(S.villagers.count(), 8), 8 end,
   },
   {
-    id = "raise_altar",
+    id = "raise_altar", age = "blood",
     name = "Raise the Altar",
     desc = "Build the Altar",
     requires = { "flock_grows" },
-    unlocks = { "rituals" },
     condition = function() return Buildings.hasBuilt("altar") end,
   },
   {
-    id = "first_blood",
+    id = "first_blood", age = "blood",
     name = "First blood",
     desc = "Let 10 servants die",
     requires = { "raise_altar" },
@@ -45,14 +42,14 @@ return {
     progress = function(S) return math.min(S.villagers.deaths, 10), 10 end,
   },
   {
-    id = "harvest_burns",
+    id = "harvest_burns", age = "blood",
     name = "The harvest burns",
     desc = "Burn 50 food at the Altar",
     requires = { "first_blood" },
     condition = function(S) return S.checklist.burns >= 1 end,
   },
   {
-    id = "blood_soil",
+    id = "blood_soil", age = "bones",
     name = "Blood for the soil",
     desc = "Sacrifice 3 servants at the Altar",
     requires = { "harvest_burns" },
@@ -60,7 +57,7 @@ return {
     progress = function(S) return math.min(S.checklist.sacrifices, 3), 3 end,
   },
   {
-    id = "horde_sated",
+    id = "horde_sated", age = "bones",
     name = "The horde is sated",
     desc = "Survive the year-5 horde",
     requires = { "blood_soil" },
@@ -68,7 +65,7 @@ return {
     progress = function(S) return math.min(S.waves.hordesSurvived, 5), 5 end,
   },
   {
-    id = "fields_red",
+    id = "fields_red", age = "chosen",
     name = "The fields run red",
     desc = "Let 50 servants die",
     requires = { "horde_sated" },
@@ -76,7 +73,7 @@ return {
     progress = function(S) return math.min(S.villagers.deaths, 50), 50 end,
   },
   {
-    id = "stars_right",
+    id = "stars_right", age = "chosen",
     name = "The stars are right",
     desc = "Survive the year-6 horde",
     requires = { "fields_red" },
@@ -84,9 +81,9 @@ return {
     progress = function(S) return math.min(S.waves.hordesSurvived, 6), 6 end,
   },
   {
-    id = "vessel_quickens",
+    id = "vessel_quickens", age = "end",
     name = "The vessel quickens",
-    desc = "Conceive the Antichrist at the Altar",
+    desc = "Conceive the Antichrist",
     requires = { "stars_right" },
     condition = function(S) return S.villagers.conceived end,
   },

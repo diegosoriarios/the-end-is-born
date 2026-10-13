@@ -4,6 +4,7 @@ local Grid = require("src.sim.grid")
 local Enemies = require("src.sim.enemies")
 local Villagers = require("src.sim.villagers")
 local Buildings = require("src.sim.buildings")
+local Ages = require("src.sim.ages")
 local Audio = require("src.audio.audio")
 local Settings = require("src.core.settings")
 local Menu = require("src.ui.menu")
@@ -91,16 +92,15 @@ function love.keypressed(key)
   if State.mode ~= "playing" or State.paused or State.settingsOpen then return end
   if key == "r" then
     State.reset()
-  elseif key == "1" then
-    State.setBuildType("wall")
-  elseif key == "2" then
-    State.setBuildType("arrow_tower")
-  elseif key == "3" then
-    State.setBuildType("ballista")
-  elseif key == "4" then
-    State.setBuildType("house")
-  elseif key == "5" then
-    State.setBuildType("altar")
+  elseif key:match("^[1-9]$") then
+    local idx = tonumber(key)
+    local n = 0
+    for _, kind in ipairs(Buildings.buildIn(State.buildCategory or "defense")) do
+      if Ages.unlocked(kind) then
+        n = n + 1
+        if n == idx then State.setBuildType(kind) break end
+      end
+    end
   elseif key == "c" then
     State.checklistVisible = not State.checklistVisible
   elseif key == "b" then
@@ -157,17 +157,28 @@ function love.mousepressed(x, y, button)
       end
     end
     if not sel then
+      local dx, dy = wx - State.village.x, wy - State.village.y
+      if dx * dx + dy * dy <= State.village.r * State.village.r then sel = { heart = true } end
+    end
+    if not sel then
       local b = Buildings.at(gx, gy)
       if b > 0 then sel = { building = b } end
     end
     State.selection = sel
     State.follow = sel ~= nil and sel.villager ~= nil
   elseif button == 2 then
-    if State.selection then
+    local wx, wy = Camera.toWorld(x, y)
+    if State.buildMode then
+      State.buildMode = false
+    elseif State.selection and State.selection.villager then
+      -- assign the selected villager to the clicked resource/building
+      if not State.assignTo(State.selection.villager, wx, wy) then
+        State.selection = nil
+        State.follow = false
+      end
+    else
       State.selection = nil
       State.follow = false
-    else
-      State.buildMode = false
     end
   end
 end

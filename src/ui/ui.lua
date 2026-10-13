@@ -5,24 +5,29 @@ local Villagers = require("src.sim.villagers")
 local Nodes = require("src.sim.nodes")
 local Enemies = require("src.sim.enemies")
 local Checklist = require("src.sim.checklist")
+local Ages = require("src.sim.ages")
+local Research = require("src.sim.research")
 local Particles = require("src.fx.particles")
 local Audio = require("src.audio.audio")
 local enemyData = require("src.data.enemies")
 local buildingData = require("src.data.buildings")
-local resData = require("src.data.resources")
+local vData = require("src.data.villagers")
 
 local UI = {}
 
+-- Layout regions.
+local TOP_H = 100
+local BOTTOM_H = 138
+
 local bigFont, medFont, smallFont, debugFont
 local buttons = {}
-local selPanel = { x = 0, y = 0, w = 220, h = 110 }
+local actionTitle = ""
 
-local KIND_LABEL = {
-  arrow_tower = "Arrow Tower",
-  ballista = "Ballista",
-  house = "House",
-  wall = "Wall",
-  altar = "Altar",
+local CATEGORY_LABEL = {
+  defense = "Defense",
+  economy = "Economy",
+  ritual = "Ritual",
+  research = "Research",
 }
 
 local JOB_LABEL = {
@@ -33,6 +38,11 @@ local JOB_LABEL = {
   build = "Build",
 }
 
+local function kindLabel(kind)
+  local d = buildingData[kind]
+  return (d and d.name) or kind
+end
+
 local function pointInRect(px, py, r)
   return px >= r.x and px <= r.x + r.w and py >= r.y and py <= r.y + r.h
 end
@@ -40,7 +50,7 @@ end
 local function costLabel(cost)
   if not cost then return "" end
   local parts = {}
-  for _, res in ipairs({ "wood", "food", "stone" }) do
+  for _, res in ipairs({ "wood", "food", "stone", "bone" }) do
     if cost[res] then parts[#parts + 1] = cost[res] .. res:sub(1, 1) end
   end
   return table.concat(parts, " ")
@@ -53,9 +63,14 @@ function UI.load()
   debugFont = love.graphics.newFont(13)
 end
 
-local function addBuildButton(x, y, key, label, buildType, S)
-  local d = buildingData[buildType]
-  local locked = d.unlock and not Checklist.isDone(d.unlock)
+-- ---------------------------------------------------------------------------
+-- Command bar buttons
+-- ---------------------------------------------------------------------------
+
+local function addPaletteButton(x, y, kind, hotkey, S)
+  local d = buildingData[kind]
+  local lockLabel = Ages.lockLabel(kind)
+  local locked = lockLabel ~= nil
   local affordable = true
   if d.cost then
     for res, amt in pairs(d.cost) do
@@ -63,153 +78,212 @@ local function addBuildButton(x, y, key, label, buildType, S)
     end
   end
   buttons[#buttons + 1] = {
-    x = x, y = y, w = 130, h = 44,
-    label = label .. " [" .. key .. "]",
-    sub = locked and ("Locked: " .. Checklist.entryName(d.unlock)) or costLabel(d.cost),
-    buildType = buildType,
+    x = x, y = y, w = 136, h = 42,
+    label = (d.name or kind) .. (hotkey and (" [" .. hotkey .. "]") or ""),
+    sub = locked and ("Locked: " .. lockLabel) or costLabel(d.cost),
+    buildType = kind,
     disabled = locked or not affordable,
-    locked = locked,
   }
 end
 
-local function addSelectionPanel(S, w, h)
+-- Unlocked buildable kinds within a category (age-gated ones are hidden).
+local function unlockedIn(cat)
+  local out = {}
+  for _, kind in ipairs(Buildings.buildIn(cat)) do
+    if Ages.unlocked(kind) then out[#out + 1] = kind end
+  end
+  return out
+end
+
+local function ensureCategory(S)
+  if S.buildCategory and #unlockedIn(S.buildCategory) > 0 then return end
+  for _, cat in ipairs(Buildings.categories()) do
+    if #unlockedIn(cat) > 0 then
+      S.buildCategory = cat
+      return
+    end
+  end
+  S.buildCategory = nil
+end
+
+local function buildTabs(S)
+  ensureCategory(S)
+  local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+  local by = h - BOTTOM_H
+  local x = 12
+  for _, cat in ipairs(Buildings.categories()) do
+    if #unlockedIn(cat) > 0 then
+      buttons[#buttons + 1] = {
+        x = x, y = by + 8, w = 108, h = 26,
+        label = CATEGORY_LABEL[cat] or cat,
+        tab = cat,
+        active = S.buildCategory == cat,
+      }
+      x = x + 108 + 6
+    end
+  end
+end
+
+local function buildPalette(S)
+  local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+  local by = h - BOTTOM_H
+  local splitX = math.floor(w * 0.54)
+  local list = unlockedIn(S.buildCategory)
+  local bw, bh, gap = 136, 42, 8
+  local leftW = splitX - 12
+  local cols = math.max(1, math.floor((leftW + gap) / (bw + gap)))
+  for i, kind in ipairs(list) do
+    local col = (i - 1) % cols
+    local row = math.floor((i - 1) / cols)
+    addPaletteButton(12 + col * (bw + gap), by + 44 + row * (bh + gap), kind, i <= 9 and i or nil, S)
+  end
+end
+
+local function buildGlobals(S)
+  local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+  local by = h - BOTTOM_H
+  local gw, gap = 106, 6
+  buttons[#buttons + 1] = {
+    x = w - 12 - gw, y = by + 8, w = gw, h = 26,
+    label = "Debug [F3]", debugToggle = true, active = S.debug,
+  }
+  buttons[#buttons + 1] = {
+    x = w - 12 - gw - gap - gw, y = by + 8, w = gw, h = 26,
+    label = "Custom [C]", checklistToggle = true, active = S.checklistVisible ~= false,
+  }
+end
+
+local function buildActions(S)
+  local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+  local by = h - BOTTOM_H
+  local splitX = math.floor(w * 0.54)
+  local ax = splitX + 12
+  local aw = w - ax - 12
+  local colW, gap, btnH = 168, 6, 26
+  local cols = math.max(1, math.floor((aw + gap) / (colW + gap)))
+  local y0 = by + 44
+  local idx = 0
+  local function act(label, fields, disabled, active)
+    local col = idx % cols
+    local row = math.floor(idx / cols)
+    local b = {
+      x = ax + col * (colW + gap), y = y0 + row * (btnH + 4),
+      w = colW, h = btnH, label = label, disabled = disabled, active = active,
+    }
+    if fields then for k, v in pairs(fields) do b[k] = v end end
+    buttons[#buttons + 1] = b
+    idx = idx + 1
+  end
+
+  actionTitle = "Click a servant, a building, or the heart"
   local sel = S.selection
   if not sel then return end
-  local px = w - 236
-  if sel.villager then
+
+  if sel.heart then
+    local a = Ages.age()
+    local nxt = Ages.next()
+    actionTitle = nxt and ("The Heart — " .. a.name .. " -> " .. nxt.name) or ("The Heart — " .. a.name)
+    if not Ages.isEnd() then
+      act("Ascend to " .. ((nxt and nxt.name or ""):gsub("Age of ", "")), { ascend = true }, not Ages.canAscend(S))
+    end
+    if S.village.hp < S.village.maxHp then
+      local heal = buildingData.village_center.sacrificeHeal or 40
+      act(("Heal (+%d) — sacrifice"):format(heal), { heartHeal = true }, Villagers.pickHeartSacrifice() == nil)
+    end
+  elseif sel.villager then
     local v = sel.villager
-    local py = h - 200
-    selPanel = { x = px, y = py, w = 220, h = 150 }
-    buttons[#buttons + 1] = { x = px, y = py, w = 220, h = 150, panel = true }
-    if v.age ~= "child" then
-      local jobs = { "idle", "wood", "food", "stone", "build" }
-      for i, job in ipairs(jobs) do
-        local col = (i - 1) % 2
-        local row = math.floor((i - 1) / 2)
-        buttons[#buttons + 1] = {
-          x = px + 10 + col * 103, y = py + 52 + row * 32, w = 98, h = 27,
-          label = JOB_LABEL[job],
-          villagerJob = job,
-          villager = v,
-          active = v.job == job,
-        }
+    if v.age == "child" then
+      actionTitle = ("Child — grows up in %d months"):format(math.max(0, v.growLeft))
+    else
+      actionTitle = ("Servant — %s"):format(Villagers.jobLabel(v))
+      for _, job in ipairs({ "idle", "wood", "food", "stone", "build" }) do
+        act(JOB_LABEL[job], { villagerJob = job, villager = v }, v.confined, v.job == job)
       end
     end
   elseif sel.building then
-    local i = sel.building
-    if i > Buildings.n then return end
-    local kind = Buildings.kind[i]
-    local built = Buildings.built[i]
-    if kind == "house" and built then
-      local ph = 150
-      local py = h - 250
-      selPanel = { x = px, y = py, w = 220, h = ph }
-      buttons[#buttons + 1] = { x = px, y = py, w = 220, h = ph, panel = true }
-      local c = Villagers.coupleAt(i)
+    local bi = sel.building
+    if bi > Buildings.n then return end
+    local kind = Buildings.kind[bi]
+    local d = buildingData[kind]
+    local built = Buildings.built[bi]
+    if not built then
+      actionTitle = ("%s — building %d%%"):format(kindLabel(kind), math.floor(100 * Buildings.progress[bi] / d.buildTime))
+    elseif kind == "house" then
+      local c = Villagers.coupleAt(bi)
+      local vesselStage = Ages.reached("end")
+      actionTitle = "House — " .. (c and "bound" or "empty") .. " · +2 pop"
       if c then
-        buttons[#buttons + 1] = {
-          x = px + 10, y = py + 44, w = 200, h = 27,
-          label = c.chosen and "The vessel" or "Choose as vessel",
-          chooseCouple = i,
-          active = c.chosen,
-          disabled = c.conceived or c.conceiving,
-        }
-        buttons[#buttons + 1] = {
-          x = px + 10, y = py + 78, w = 200, h = 27,
-          label = "Unbind",
-          unbindCouple = i,
-          disabled = c.conceived or c.conceiving or (c.chosen and c.pregnant),
-        }
+        if not c.pregnant and not c.conceived and not c.conceiving then
+          local cost = vData.birthCost or 0
+          local canChild = (S.stock.food or 0) >= cost and Villagers.population() < Buildings.popCap()
+          act("Make a child (" .. cost .. "f)", { makeChild = bi }, not canChild)
+        end
+        if vesselStage and not (c.conceived or c.conceiving) then
+          act(c.chosen and "Unchoose vessel" or "Choose as vessel", { chooseCouple = bi }, false, c.chosen)
+        end
+        act("Unbind", { unbindCouple = bi }, c.conceived or c.conceiving or (c.chosen and c.pregnant))
       else
-        buttons[#buttons + 1] = {
-          x = px + 10, y = py + 44, w = 200, h = 27,
-          label = "Bind a couple",
-          bindCouple = i,
-          disabled = not (Villagers.freeAdult("m") and Villagers.freeAdult("f")),
-        }
+        act("Bind a couple", { bindCouple = bi }, not (Villagers.freeAdult("m") and Villagers.freeAdult("f")))
       end
-    elseif kind == "altar" and built then
-      local showConceive = Checklist.isDone("stars_right")
-      local rows = showConceive and 3 or 2
-      local ph = 34 + rows * 36
-      local py = h - ph - 60
-      selPanel = { x = px, y = py, w = 220, h = ph }
-      buttons[#buttons + 1] = { x = px, y = py, w = 220, h = ph, panel = true }
+    elseif Buildings.role[bi] == "graveyard" then
+      actionTitle = ("Graveyard — %d graves"):format(Buildings.graves[bi] or 0)
+      local cost = (d.raiseCost and d.raiseCost.bone) or 0
+      act("Raise undead (" .. cost .. "b)", { raiseUndead = bi }, (S.stock.bone or 0) < cost)
+    elseif Buildings.role[bi] == "research" then
+      local projId = Buildings.project[bi]
+      local pname = projId and Research.def(projId)
+      actionTitle = ("%s — %s"):format(kindLabel(kind), pname and pname.name or "idle")
+      for _, e in ipairs(Research.available(kind)) do
+        local afford = true
+        if e.def.cost then
+          for res, amt in pairs(e.def.cost) do
+            if (S.stock[res] or 0) < amt then afford = false end
+          end
+        end
+        act(e.def.name, { researchStart = e.id, researchIndex = bi }, (not afford) or projId ~= nil)
+      end
+      act("Assign researcher", { resAssign = bi },
+        (Buildings.researchers[bi] or 0) >= (d.researchSlots or 0) or Villagers.idleAdults() == 0)
+      act("Unassign researcher", { resUnassign = bi }, (Buildings.researchers[bi] or 0) == 0)
+      if d.upgradeTo then
+        local utd = buildingData[d.upgradeTo.kind]
+        act("Upgrade: " .. (utd and utd.name or d.upgradeTo.kind), { upgradeBuilding = bi }, not S.canAfford(d.upgradeTo.cost))
+      end
+    elseif kind == "altar" then
       local rites = Checklist.ritualUnlocked()
-      local by = py + 34
-      buttons[#buttons + 1] = {
-        x = px + 10, y = by, w = 200, h = 28,
-        label = "Burn harvest (" .. Checklist.HARVEST_COST .. "f)",
-        ritualBurn = true,
-        disabled = not rites or (S.stock.food or 0) < Checklist.HARVEST_COST,
-      }
-      by = by + 36
-      buttons[#buttons + 1] = {
-        x = px + 10, y = by, w = 200, h = 28,
-        label = "Sacrifice a servant",
-        ritualSacrifice = i,
-        disabled = not rites or Villagers.count() <= 1 or Villagers.pickSacrifice(i) == nil,
-      }
-      if showConceive then
-        by = by + 36
-        buttons[#buttons + 1] = {
-          x = px + 10, y = by, w = 200, h = 28,
-          label = "Conceive the Antichrist",
-          ritualConceive = i,
-          disabled = not Villagers.canConceive(),
-        }
+      actionTitle = "Altar — " .. (rites and "rites awake" or "the rites sleep")
+      act("Burn harvest (" .. Checklist.HARVEST_COST .. "f)", { ritualBurn = true }, not rites or (S.stock.food or 0) < Checklist.HARVEST_COST)
+      act("Sacrifice a servant", { ritualSacrifice = bi }, not rites or Villagers.count() <= 1 or Villagers.pickSacrifice(bi) == nil)
+      if Ages.reached("end") then
+        act("Conceive the Antichrist", { ritualConceive = bi }, not Villagers.canConceive())
       end
+    elseif Buildings.isTower[bi] then
+      actionTitle = ("%s — crew %d/%d"):format(kindLabel(kind), Buildings.crewCount[bi], Buildings.maxCrew[bi])
+      act("Assign", { crewAssign = bi }, Villagers.count() == 0)
+      act("Unassign", { crewUnassign = bi }, Buildings.crewCount[bi] == 0)
     else
-      local py = h - 200
-      selPanel = { x = px, y = py, w = 220, h = 110 }
-      buttons[#buttons + 1] = { x = px, y = py, w = 220, h = 110, panel = true }
-      if Buildings.isTower[i] then
-        buttons[#buttons + 1] = {
-          x = px + 10, y = py + 40, w = 97, h = 30,
-          label = "Assign",
-          crewAssign = i,
-          disabled = Buildings.n == 0 or Villagers.count() == 0,
-        }
-        buttons[#buttons + 1] = {
-          x = px + 113, y = py + 40, w = 97, h = 30,
-          label = "Unassign",
-          crewUnassign = i,
-          disabled = Buildings.crewCount[i] == 0,
-        }
-      end
+      actionTitle = kindLabel(kind)
     end
   end
 end
 
 function UI.buildButtons(S)
-  local w, h = love.graphics.getWidth(), love.graphics.getHeight()
   buttons = {}
   if S.mode == "playing" then
-    addBuildButton(16, h - 60, "1", "Wall", "wall", S)
-    addBuildButton(154, h - 60, "2", "Arrow Tower", "arrow_tower", S)
-    addBuildButton(292, h - 60, "3", "Ballista", "ballista", S)
-    addBuildButton(430, h - 60, "4", "House", "house", S)
-    addBuildButton(568, h - 60, "5", "Altar", "altar", S)
-    addSelectionPanel(S, w, h)
-    if Villagers.request then
-      local bw, bh = 150, 34
-      local by = h / 2 + 30
-      buttons[#buttons + 1] = { x = w / 2 - bw - 10, y = by, w = bw, h = bh, label = "Allow", birthAllow = true }
-      buttons[#buttons + 1] = { x = w / 2 + 10, y = by, w = bw, h = bh, label = "Deny", birthDeny = true }
-    end
+    buildTabs(S)
+    buildPalette(S)
+    buildActions(S)
+    buildGlobals(S)
   else
-    buttons[#buttons + 1] = {
-      x = w / 2 - 95, y = h / 2 + 56, w = 190, h = 44,
-      label = "Restart [R]",
-      action = "restart",
-    }
+    local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+    buttons[#buttons + 1] = { x = w / 2 - 95, y = h / 2 + 56, w = 190, h = 44, label = "Restart [R]", action = "restart" }
   end
   return buttons
 end
 
 function UI.handleClick(mx, my, S)
   for _, b in ipairs(UI.buildButtons(S)) do
-    if not b.panel and pointInRect(mx, my, b) then
+    if pointInRect(mx, my, b) then
       if b.disabled then
         Audio.play("error")
         return true
@@ -217,12 +291,45 @@ function UI.handleClick(mx, my, S)
       Audio.play("click")
       if b.action == "restart" then
         S.reset()
+      elseif b.tab then
+        S.buildCategory = b.tab
+      elseif b.checklistToggle then
+        S.checklistVisible = not (S.checklistVisible ~= false)
+      elseif b.debugToggle then
+        S.debug = not S.debug
+      elseif b.ascend then
+        Ages.ascend(S)
+      elseif b.heartHeal then
+        local v = Villagers.pickHeartSacrifice()
+        if v then Villagers.startHeartSacrifice(v, "heal") end
       elseif b.villagerJob then
         Villagers.setJob(b.villager, b.villagerJob)
       elseif b.crewAssign then
         Villagers.assignCrew(b.crewAssign)
       elseif b.crewUnassign then
         Villagers.unassignCrew(b.crewUnassign)
+      elseif b.raiseUndead then
+        local d = buildingData[Buildings.kind[b.raiseUndead]]
+        local cost = (d.raiseCost and d.raiseCost.bone) or 0
+        if (S.stock.bone or 0) >= cost then
+          S.stock.bone = S.stock.bone - cost
+          Villagers.spawnUndead(Buildings.x[b.raiseUndead], Buildings.y[b.raiseUndead])
+          Audio.play("ritual")
+        end
+      elseif b.researchStart then
+        Research.start(S, b.researchIndex, b.researchStart)
+      elseif b.resAssign then
+        Villagers.assignResearcher(b.resAssign)
+      elseif b.resUnassign then
+        Villagers.unassignResearcher(b.resUnassign)
+      elseif b.upgradeBuilding then
+        local i = b.upgradeBuilding
+        local d = buildingData[Buildings.kind[i]]
+        if d and d.upgradeTo and S.canAfford(d.upgradeTo.cost) then
+          for res, amt in pairs(d.upgradeTo.cost) do S.stock[res] = (S.stock[res] or 0) - amt end
+          Buildings.upgrade(i, d.upgradeTo.kind)
+          Audio.play("build_done")
+        end
       elseif b.ritualBurn then
         Checklist.burnHarvest(S)
       elseif b.ritualSacrifice then
@@ -235,11 +342,14 @@ function UI.handleClick(mx, my, S)
       elseif b.unbindCouple then
         Villagers.unbind(b.unbindCouple)
       elseif b.chooseCouple then
-        Villagers.choose(b.chooseCouple)
-      elseif b.birthAllow then
-        Villagers.allowBirth()
-      elseif b.birthDeny then
-        Villagers.denyBirth()
+        local c = Villagers.coupleAt(b.chooseCouple)
+        if c and c.chosen then
+          Villagers.unchoose(b.chooseCouple)
+        else
+          Villagers.choose(b.chooseCouple)
+        end
+      elseif b.makeChild then
+        Villagers.makeChild(b.makeChild, S)
       elseif b.buildType then
         if S.buildMode and S.buildType == b.buildType then
           S.buildMode = false
@@ -253,6 +363,10 @@ function UI.handleClick(mx, my, S)
   return false
 end
 
+-- ---------------------------------------------------------------------------
+-- Shared drawing helpers
+-- ---------------------------------------------------------------------------
+
 local function drawButton(b)
   local bg = b.active and { 0.45, 0.25, 0.55 } or { 0.16, 0.13, 0.22 }
   local fg = b.active and { 0.75, 0.5, 0.85 } or { 0.45, 0.42, 0.55 }
@@ -260,18 +374,20 @@ local function drawButton(b)
     bg = { 0.10, 0.09, 0.13 }
     fg = { 0.28, 0.26, 0.33 }
   end
-  love.graphics.setColor(bg[1], bg[2], bg[3], b.panel and 0.92 or 1)
+  love.graphics.setColor(bg[1], bg[2], bg[3])
   love.graphics.rectangle("fill", b.x, b.y, b.w, b.h, 4)
   love.graphics.setColor(fg[1], fg[2], fg[3])
   love.graphics.setLineWidth(1)
   love.graphics.rectangle("line", b.x, b.y, b.w, b.h, 4)
   love.graphics.setFont(debugFont)
-  if b.sub then
-    love.graphics.print(b.label, b.x + 8, b.y + 5)
-    love.graphics.print(b.sub, b.x + 8, b.y + 24)
-  else
-    local tw = debugFont:getWidth(b.label)
-    love.graphics.print(b.label, b.x + (b.w - tw) / 2, b.y + (b.h - debugFont:getHeight()) / 2)
+  if b.label then
+    if b.sub then
+      love.graphics.print(b.label, b.x + 8, b.y + 5)
+      love.graphics.print(b.sub, b.x + 8, b.y + 24)
+    else
+      local tw = debugFont:getWidth(b.label)
+      love.graphics.print(b.label, b.x + (b.w - tw) / 2, b.y + (b.h - debugFont:getHeight()) / 2)
+    end
   end
 end
 
@@ -295,7 +411,7 @@ local function worldTooltip(S, mx, my)
       return ("Child · grows up in %d months"):format(math.max(0, v.growLeft))
     end
     local carry = v.carry > 0 and (" · carrying " .. v.carry .. " " .. v.carryRes) or ""
-    return ("Servant · %s%s · hunger %d%%"):format(Villagers.jobLabel(v), carry, v.hunger)
+    return ("Servant · %s%s · hp %d/%d"):format(Villagers.jobLabel(v), carry, math.ceil(v.hp), v.maxHp)
   end
   local gx, gy = Grid.worldToTile(wx, wy)
   local b = Buildings.at(gx, gy)
@@ -309,16 +425,22 @@ local function worldTooltip(S, mx, my)
     local kind = Buildings.kind[b]
     if not Buildings.built[b] then
       local d = buildingData[kind]
-      return ("%s · building %d%%"):format(KIND_LABEL[kind], math.floor(100 * Buildings.progress[b] / d.buildTime))
+      return ("%s · building %d%%"):format(kindLabel(kind), math.floor(100 * Buildings.progress[b] / d.buildTime))
     elseif Buildings.isTower[b] then
       local status = Buildings.crewCount[b] >= Buildings.maxCrew[b]
         and ("crew %d/%d"):format(Buildings.crewCount[b], Buildings.maxCrew[b])
         or ("OFFLINE · crew %d/%d"):format(Buildings.crewCount[b], Buildings.maxCrew[b])
-      return ("%s · %s"):format(KIND_LABEL[kind], status)
+      return ("%s · %s"):format(kindLabel(kind), status)
     elseif kind == "house" then
       return "House · +2 population"
     elseif kind == "altar" then
       return Checklist.ritualUnlocked() and "Altar · dark rituals" or "Altar · the rites sleep"
+    elseif Buildings.role[b] == "research" then
+      local p = Buildings.project[b]
+      local def = p and Research.def(p)
+      return kindLabel(kind) .. (def and (" · researching " .. def.name) or " · idle")
+    elseif Buildings.role[b] == "graveyard" then
+      return kindLabel(kind) .. (" · %d graves"):format(Buildings.graves[b] or 0)
     end
   end
   local list = Nodes.list
@@ -344,125 +466,184 @@ local function drawTooltip(text, mx, my)
   love.graphics.print(text, tx, ty)
 end
 
-local function coupleLabel(c)
-  local m = c.man and (c.man.dead and "†" or "") or "†"
-  local f = c.woman and (c.woman.dead and "†" or "") or "†"
-  return ("Man%s · Woman%s"):format(m, f)
+-- ---------------------------------------------------------------------------
+-- Top status bar
+-- ---------------------------------------------------------------------------
+
+local function drawHordeTimer(S)
+  local w = love.graphics.getWidth()
+  local wl = S.waves
+  local cx = w / 2
+  if wl.phase == "wave" then
+    love.graphics.setFont(medFont)
+    love.graphics.setColor(0.95, 0.35, 0.35)
+    local t = wl.calendar.apocalypse
+      and ("THE END TIMES — enemies %d"):format(S.enemies.n)
+      or ("UNDER ATTACK — enemies %d"):format(S.enemies.n)
+    love.graphics.print(t, cx - medFont:getWidth(t) / 2, 44)
+  else
+    local pv = wl:preview()
+    local secs = math.max(0, math.floor(pv.secs))
+    local t = ("HORDE IN %d:%02d"):format(math.floor(secs / 60), secs % 60)
+    love.graphics.setFont(bigFont)
+    love.graphics.setColor(secs <= 30 and { 0.95, 0.4, 0.4 } or { 0.84, 0.55, 0.95 })
+    love.graphics.print(t, cx - bigFont:getWidth(t) / 2, 24)
+  end
+  love.graphics.setColor(0.9, 0.86, 0.95)
 end
 
-local function drawSelectionPanel(S)
-  local sel = S.selection
-  if not sel then return end
-  local px, py = selPanel.x, selPanel.y
+local function drawTopBar(S)
+  local w = love.graphics.getWidth()
+  love.graphics.setColor(0.055, 0.045, 0.085, 1.0)
+  love.graphics.rectangle("fill", 0, 0, w, TOP_H)
+  love.graphics.setColor(0.30, 0.22, 0.40)
+  love.graphics.setLineWidth(1)
+  love.graphics.line(0, TOP_H, w, TOP_H)
+
+  local wl = S.waves
+  local cal = wl.calendar
   love.graphics.setFont(debugFont)
-  love.graphics.setColor(0.88, 0.85, 0.95)
-  if sel.villager then
-    local v = sel.villager
-    love.graphics.print(("Servant (%s) · %s"):format(v.sex == "f" and "woman" or "man", Villagers.jobLabel(v)), px + 10, py + 8)
-    if v.age == "child" then
-      love.graphics.setColor(0.75, 0.7, 0.85)
-      love.graphics.print(("Child · grows up in %d months"):format(math.max(0, v.growLeft)), px + 10, py + 30)
+  love.graphics.setColor(0.9, 0.86, 0.95)
+  love.graphics.print(("%s · Year %d · Month %d%s")
+    :format(Ages.age().name, cal.year, cal.month, cal.apocalypse and "  ·  THE END TIMES" or ""), 16, 10)
+
+  -- Heart hp bar (left)
+  local v = S.village
+  local hbW, hbH = 240, 16
+  love.graphics.setColor(0.10, 0.10, 0.13)
+  love.graphics.rectangle("fill", 16, 32, hbW, hbH, 3)
+  love.graphics.setColor(0.62, 0.28, 0.72)
+  love.graphics.rectangle("fill", 16, 32, hbW * (v.hp / v.maxHp), hbH, 3)
+  love.graphics.setColor(0.9, 0.86, 0.95)
+  love.graphics.print(("Heart  %d / %d"):format(v.hp, v.maxHp), 22, 33)
+
+  -- Resources (right)
+  local res = ("Wood %d   Food %d   Stone %d   Bones %d   Servants %d/%d")
+    :format(S.stock.wood, S.stock.food, S.stock.stone, S.stock.bone or 0, S.villagers.count(), Buildings.popCap())
+  love.graphics.print(res, w - 16 - debugFont:getWidth(res), 10)
+
+  drawHordeTimer(S)
+
+  -- Next-horde preview (centred, under the clock)
+  if wl.phase == "village" then
+    local pv = wl:preview()
+    local parts = {}
+    for _, kind in ipairs(pv.order) do
+      local d = enemyData[kind]
+      parts[#parts + 1] = pv.counts[kind] .. "× " .. (d and d.name or kind)
     end
-    local barY = v.age == "child" and py + 120 or py + 126
-    love.graphics.setColor(0.12, 0.10, 0.15)
-    love.graphics.rectangle("fill", px + 10, barY, 200, 14, 2)
-    love.graphics.setColor(0.85, 0.65, 0.25)
-    love.graphics.rectangle("fill", px + 10, barY, 200 * math.min(1, v.hunger / 100), 14, 2)
-    love.graphics.setColor(0.88, 0.85, 0.95)
-    love.graphics.print(("hunger %d%%  ·  hp %d"):format(v.hunger, math.ceil(v.hp)), px + 16, barY + 1)
-  elseif sel.building then
-    local i = sel.building
-    if i > Buildings.n then return end
-    local kind = Buildings.kind[i]
-    local d = buildingData[kind]
-    if not Buildings.built[i] then
-      love.graphics.print(("%s · building %d%%"):format(KIND_LABEL[kind], math.floor(100 * Buildings.progress[i] / d.buildTime)), px + 10, py + 8)
-    elseif kind == "altar" then
-      love.graphics.print("Altar", px + 10, py + 8)
-      love.graphics.setColor(0.6, 0.58, 0.68)
-      local status
-      if S.villagers.conceived then
-        status = "the vessel quickens"
-      elseif not Checklist.ritualUnlocked() then
-        status = "the rites sleep"
-      elseif Checklist.isDone("stars_right") then
-        status = "name the vessel, then conceive"
-      else
-        status = "the ground thirsts"
-      end
-      love.graphics.print(status, px + 10, py + 22)
-    elseif kind == "house" then
-      love.graphics.print("House · +2 population cap", px + 10, py + 8)
-      local c = Villagers.coupleAt(i)
-      love.graphics.setColor(0.6, 0.58, 0.68)
-      if c then
-        local status
-        if c.conceived then
-          status = ("carrying the Antichrist · %d months"):format(math.max(0, c.monthsLeft))
-        elseif c.pregnant then
-          status = ("expecting · %d months"):format(math.max(0, c.monthsLeft))
-        elseif c.conceiving then
-          status = "walking to the altar"
-        elseif c.pending then
-          status = "asking for a child"
-        elseif c.chosen then
-          status = "THE VESSEL · awaits the ritual"
-        else
-          status = "bound"
-        end
-        love.graphics.print(status, px + 10, py + 24)
-      else
-        love.graphics.print("no couple bound", px + 10, py + 24)
-      end
-    elseif Buildings.isTower[i] then
-      local staffed = Buildings.crewCount[i] >= Buildings.maxCrew[i]
-      love.graphics.print(("%s · crew %d/%d%s"):format(KIND_LABEL[kind], Buildings.crewCount[i], Buildings.maxCrew[i], staffed and "" or " · OFFLINE"), px + 10, py + 8)
-      love.graphics.setColor(0.6, 0.58, 0.68)
-      love.graphics.print(staffed and "firing" or "needs a servant to fire", px + 10, py + 24)
+    if pv.boss then
+      local d = enemyData[pv.boss]
+      parts[#parts + 1] = (d and d.name or pv.boss):upper()
+    end
+    local from = {}
+    for _, e in ipairs({ "N", "E", "S", "W" }) do
+      if pv.edges[e] then from[#from + 1] = e end
+    end
+    local line = "Next: " .. table.concat(parts, " · ")
+    if #from > 0 and #from < 4 then line = line .. "  —  from " .. table.concat(from, ", ") end
+    love.graphics.setFont(debugFont)
+    love.graphics.setColor(0.95, 0.75, 0.55)
+    love.graphics.print(line, w / 2 - debugFont:getWidth(line) / 2, 82)
+    love.graphics.setColor(0.9, 0.86, 0.95)
+  end
+
+  -- Boss bar (just below the top bar)
+  if wl.bossKind and wl.phase == "wave" then
+    local E = S.enemies
+    local ki = Enemies.kindIndex[wl.bossKind]
+    local hp, mx = 0, 0
+    for i = 1, E.n do
+      if E.kind[i] == ki then hp = hp + E.hp[i]; mx = mx + E.maxHp[i] end
+    end
+    if mx > 0 then
+      local bw, bh = 400, 12
+      local bx, by = w / 2 - bw / 2, TOP_H + 6
+      love.graphics.setColor(0.10, 0.10, 0.13)
+      love.graphics.rectangle("fill", bx, by, bw, bh, 3)
+      love.graphics.setColor(0.85, 0.15, 0.2)
+      love.graphics.rectangle("fill", bx, by, bw * (hp / mx), bh, 3)
+      love.graphics.setColor(0.95, 0.85, 0.9)
+      love.graphics.setFont(smallFont)
+      local d = enemyData[wl.bossKind]
+      local bl = (d and d.name or wl.bossKind):upper()
+      love.graphics.print(bl, w / 2 - smallFont:getWidth(bl) / 2, by + bh + 2)
     end
   end
 end
+
+-- ---------------------------------------------------------------------------
+-- Bottom command bar
+-- ---------------------------------------------------------------------------
+
+local function drawCommandBarBg()
+  local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+  local by = h - BOTTOM_H
+  love.graphics.setColor(0.055, 0.045, 0.085, 1.0)
+  love.graphics.rectangle("fill", 0, by, w, BOTTOM_H)
+  local splitX = math.floor(w * 0.54)
+  love.graphics.setColor(0.30, 0.22, 0.40)
+  love.graphics.setLineWidth(1)
+  love.graphics.line(splitX, by + 6, splitX, h - 6)
+  love.graphics.setFont(debugFont)
+  love.graphics.setColor(0.85, 0.78, 0.95)
+  love.graphics.print(actionTitle, splitX + 12, by + 24)
+end
+
+-- ---------------------------------------------------------------------------
+-- Objectives panel / toasts / debug
+-- ---------------------------------------------------------------------------
 
 local function drawChecklist(S)
   if S.checklistVisible == false then return 0 end
   local entries, stateOf = Checklist.list()
+  local cur = Ages.age()
   local rows = {}
   for i = 1, #entries do
     local e = entries[i]
     local st = stateOf[e.id]
-    if st == "done" or st == "active" then
+    if (st == "done" or st == "active") and (e.age == cur.id or e.age == nil) then
       rows[#rows + 1] = e
     end
   end
   local x = love.graphics.getWidth() - 244
-  local y = 8
-  local h = 28 + #rows * 32
-  love.graphics.setColor(0.08, 0.06, 0.12, 0.88)
+  local y = TOP_H + 8
+  local h = 30 + #rows * 32 + 22
+  love.graphics.setColor(0.08, 0.06, 0.12, 0.9)
   love.graphics.rectangle("fill", x, y, 228, h, 4)
   love.graphics.setColor(0.55, 0.32, 0.68)
   love.graphics.setLineWidth(1)
   love.graphics.rectangle("line", x, y, 228, h, 4)
   love.graphics.setFont(debugFont)
   love.graphics.setColor(0.85, 0.7, 0.95)
-  love.graphics.print("THE CUSTOM", x + 10, y + 6)
-  local ry = y + 24
+  love.graphics.print(cur.name:upper(), x + 10, y + 6)
+  local ry = y + 28
   for i = 1, #rows do
     local e = rows[i]
     local done = stateOf[e.id] == "done"
     love.graphics.setColor(done and 0.45 or 0.92, done and 0.7 or 0.86, done and 0.5 or 0.95)
-    local mark = done and "✓ " or "· "
-    love.graphics.print(mark .. e.name, x + 10, ry)
+    love.graphics.print((done and "✓ " or "· ") .. e.name, x + 10, ry)
     if not done then
       love.graphics.setColor(0.62, 0.55, 0.7)
       local line = e.desc
       if e.progress then
-        local cur, mx = e.progress(S)
-        line = line .. ("  %d/%d"):format(cur, mx)
+        local a, b = e.progress(S)
+        line = line .. ("  %d/%d"):format(a, b)
       end
       love.graphics.print(line, x + 18, ry + 13)
     end
     ry = ry + 32
   end
+  love.graphics.setColor(0.95, 0.75, 0.55)
+  local foot
+  if Ages.isEnd() then
+    foot = "the end times await"
+  elseif Ages.objectivesDone(cur.id) then
+    foot = "Ascend at the Heart  ->  " .. Ages.next().name:gsub("Age of ", "")
+  else
+    foot = "Next: " .. Ages.next().name
+  end
+  love.graphics.print(foot, x + 10, y + h - 18)
   return h
 end
 
@@ -471,7 +652,7 @@ local function drawToasts()
   if #list == 0 then return end
   local w = love.graphics.getWidth()
   love.graphics.setFont(smallFont)
-  local y = 64
+  local y = TOP_H + 12
   for i = 1, #list do
     local t = list[i]
     local a = math.min(1, t.t)
@@ -520,26 +701,7 @@ local function drawDebug(S, y0)
   love.graphics.print("K +1k  shift+K +10k  F3 close", x, top + 6 + #lines * 16)
 end
 
-local function drawBirthModal()
-  local w, h = love.graphics.getWidth(), love.graphics.getHeight()
-  local bw, bh = 440, 130
-  local bx, by = w / 2 - bw / 2, h / 2 - bh / 2
-  love.graphics.setColor(0, 0, 0, 0.45)
-  love.graphics.rectangle("fill", 0, 0, w, h)
-  love.graphics.setColor(0.10, 0.07, 0.14, 0.96)
-  love.graphics.rectangle("fill", bx, by, bw, bh, 6)
-  love.graphics.setColor(0.62, 0.28, 0.72)
-  love.graphics.setLineWidth(2)
-  love.graphics.rectangle("line", bx, by, bw, bh, 6)
-  love.graphics.setFont(smallFont)
-  love.graphics.setColor(0.9, 0.86, 0.95)
-  local t = "A bound couple asks to bear a child"
-  love.graphics.print(t, w / 2 - smallFont:getWidth(t) / 2, by + 20)
-  love.graphics.setFont(debugFont)
-  love.graphics.setColor(0.7, 0.64, 0.78)
-  local t2 = "Approved births feed both the flock and the custom."
-  love.graphics.print(t2, w / 2 - debugFont:getWidth(t2) / 2, by + 48)
-end
+-- ---------------------------------------------------------------------------
 
 function UI.draw(S)
   local w, h = love.graphics.getWidth(), love.graphics.getHeight()
@@ -547,106 +709,27 @@ function UI.draw(S)
     love.graphics.setColor(0.55, 0.05, 0.10, S.flash)
     love.graphics.rectangle("fill", 0, 0, w, h)
   end
-  if S.mode == "playing" and Villagers.request then drawBirthModal() end
+
   local bs = UI.buildButtons(S)
+  if S.mode == "playing" then
+    drawTopBar(S)
+    drawCommandBarBg()
+  end
   for _, b in ipairs(bs) do
     if b.buildType then b.active = S.buildMode and S.buildType == b.buildType end
     drawButton(b)
   end
-  drawSelectionPanel(S)
 
   if S.mode == "playing" then
-    local wl = S.waves
-    local cal = wl.calendar
-    love.graphics.setColor(0.9, 0.86, 0.95)
-    love.graphics.setFont(medFont)
-    local info
-    if wl.phase == "wave" then
-      info = cal.apocalypse
-        and ("END TIMES HORDE %d  —  enemies: %d"):format(wl.number, S.enemies.n)
-        or ("HORDE — YEAR %d  —  enemies: %d"):format(wl.number, S.enemies.n)
-    else
-      local pv = wl:preview()
-      info = ("%s in %ds  [Space to summon]"):format(pv.label, math.ceil(pv.secs))
-    end
-    love.graphics.print(info, 16, 12)
-
-    love.graphics.setFont(debugFont)
-    love.graphics.print(("Year %d · Month %d%s   Wood %d   Food %d   Stone %d   Servants %d/%d")
-      :format(cal.year, cal.month, cal.apocalypse and "  ·  THE END TIMES" or "",
-        S.stock.wood, S.stock.food, S.stock.stone, S.villagers.count(), Buildings.popCap()), 16, 40)
-
-    if wl.phase == "village" then
-      local pv = wl:preview()
-      local parts = {}
-      for _, kind in ipairs(pv.order) do
-        local d = enemyData[kind]
-        parts[#parts + 1] = pv.counts[kind] .. "× " .. (d and d.name or kind)
-      end
-      if pv.boss then
-        local d = enemyData[pv.boss]
-        parts[#parts + 1] = (d and d.name or pv.boss):upper()
-      end
-      local edgeOrder = { "N", "E", "S", "W" }
-      local from = {}
-      for _, e in ipairs(edgeOrder) do
-        if pv.edges[e] then from[#from + 1] = e end
-      end
-      local line = "Next: " .. table.concat(parts, " · ")
-      if #from > 0 and #from < 4 then line = line .. "  —  from " .. table.concat(from, ", ") end
-      love.graphics.setColor(0.95, 0.75, 0.55)
-      love.graphics.print(line, 16, 58)
-      love.graphics.setColor(0.9, 0.86, 0.95)
-    end
-
-    if wl.bossKind and wl.phase == "wave" then
-      local E = S.enemies
-      local ki = Enemies.kindIndex[wl.bossKind]
-      local hp, mx = 0, 0
-      for i = 1, E.n do
-        if E.kind[i] == ki then
-          hp = hp + E.hp[i]
-          mx = mx + E.maxHp[i]
-        end
-      end
-      if mx > 0 then
-        local bw, bh = 400, 12
-        local bx, by = w / 2 - bw / 2, 40
-        love.graphics.setColor(0.10, 0.10, 0.13)
-        love.graphics.rectangle("fill", bx, by, bw, bh, 3)
-        love.graphics.setColor(0.85, 0.15, 0.2)
-        love.graphics.rectangle("fill", bx, by, bw * (hp / mx), bh, 3)
-        love.graphics.setColor(0.95, 0.85, 0.9)
-        love.graphics.setFont(smallFont)
-        local d = enemyData[wl.bossKind]
-        local bl = (d and d.name or wl.bossKind):upper()
-        love.graphics.print(bl, w / 2 - smallFont:getWidth(bl) / 2, by + bh + 2)
-      end
-    end
-
-    local v = S.village
-    local barW, barH = 300, 16
-    local bx, by = w / 2 - barW / 2, 14
-    love.graphics.setColor(0.10, 0.10, 0.13)
-    love.graphics.rectangle("fill", bx, by, barW, barH, 3)
-    love.graphics.setColor(0.62, 0.28, 0.72)
-    love.graphics.rectangle("fill", bx, by, barW * (v.hp / v.maxHp), barH, 3)
-    love.graphics.setColor(0.9, 0.86, 0.95)
-    love.graphics.setFont(smallFont)
-    local label = ("Village  %d / %d"):format(v.hp, v.maxHp)
-    love.graphics.print(label, w / 2 - smallFont:getWidth(label) / 2, by + 1)
-
-    love.graphics.setFont(debugFont)
-    love.graphics.print("1 wall · 2 tower · 3 ballista · 4 house · 5 altar · C custom · click altar: rites · F3 debug · R restart", 16, h - 74)
-
-    if S.buildMode then
-      local hint = "Click to place " .. S.buildType .. "  ·  right-click to cancel"
-      love.graphics.print(hint, w / 2 - debugFont:getWidth(hint) / 2, h - 28)
-    end
-
     local panelH = drawChecklist(S)
     drawToasts()
-    if S.debug then drawDebug(S, 8 + panelH + 8) end
+    if S.buildMode then
+      love.graphics.setFont(debugFont)
+      love.graphics.setColor(0.9, 0.86, 0.95)
+      local hint = "Click to place " .. (buildingData[S.buildType] and buildingData[S.buildType].name or S.buildType) .. "  ·  right-click to cancel"
+      love.graphics.print(hint, w / 2 - debugFont:getWidth(hint) / 2, h - BOTTOM_H - 22)
+    end
+    if S.debug then drawDebug(S, TOP_H + 8 + panelH + 8) end
   elseif S.mode == "gameover" or S.mode == "victory" then
     love.graphics.setColor(0, 0, 0, 0.6)
     love.graphics.rectangle("fill", 0, 0, w, h)

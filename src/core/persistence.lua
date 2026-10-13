@@ -8,6 +8,8 @@ local Walls = require("src.sim.walls")
 local Villagers = require("src.sim.villagers")
 local Nodes = require("src.sim.nodes")
 local Checklist = require("src.sim.checklist")
+local Ages = require("src.sim.ages")
+local Research = require("src.sim.research")
 local Flow = require("src.sim.flowfield")
 
 local Persistence = {}
@@ -40,6 +42,7 @@ function Persistence.snapshot(S)
       kind = Buildings.kind[i], gx = Buildings.gx[i], gy = Buildings.gy[i],
       hp = Buildings.hp[i], maxHp = Buildings.maxHp[i], progress = Buildings.progress[i],
       built = Buildings.built[i], crewCount = Buildings.crewCount[i], cd = Buildings.cd[i],
+      project = Buildings.project[i], rprogress = Buildings.rprogress[i],
     }
   end
   snap.buildings = bl
@@ -64,11 +67,12 @@ function Persistence.snapshot(S)
     local v = Villagers.list[i]
     vl[i] = {
       id = v.id, x = v.x, y = v.y, sex = v.sex, family = v.family,
-      hp = v.hp, maxHp = v.maxHp, r = v.r, hunger = v.hunger,
+      hp = v.hp, maxHp = v.maxHp, r = v.r,
       job = v.job, state = v.state, carry = v.carry, carryRes = v.carryRes,
       nodeIndex = v.node and nodeIndex[v.node] or nil,
       buildTarget = v.buildTarget, building = v.building, altar = v.altar,
       timer = v.timer, wx = v.wx, wy = v.wy, age = v.age, growLeft = v.growLeft,
+      undead = v.undead, confined = v.confined,
     }
   end
   snap.villagers = vl
@@ -94,6 +98,8 @@ function Persistence.snapshot(S)
     sacrifices = Checklist.sacrifices,
     burns = Checklist.burns,
   }
+  snap.age = Ages.current
+  snap.research = Research.ids()
 
   local w = S.waves
   local tl = {}
@@ -135,6 +141,8 @@ function Persistence.restore(S, snap)
   Walls.load(snap.walls)
   Nodes.list = snap.nodes
   Checklist.load(snap.checklist.ids, snap.checklist.sacrifices, snap.checklist.burns)
+  Ages.load(snap.age)
+  Research.load(snap.research)
   Villagers.load(snap.villagers, snap.couples, snap.requestId, snap.deaths, snap.conceived, snap.seenEpoch)
   local w = S.waves
   w.phase = snap.waves.phase

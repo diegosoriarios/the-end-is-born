@@ -241,24 +241,84 @@ Implementation notes:
 
 ---
 
+## Post-M7 fixes & design pass
+
+- **Enemy visibility** — the M7d per-kind sprites read as transparent/hollow at gameplay scale (the dark eye/fang features dominated). Reverted to **solid opaque disc sprites** per kind (rim + color + highlight, no face), keeping the per-kind atlas + single `SpriteBatch`.
+- **Hunger removed** — deleted the per-villager hunger/eat/starve system (`data/villagers.lua`, sim update, save snapshot, HUD bar/tooltip). The villager selection panel now shows a compact `hp N/M` line instead of the hunger bar (which also fixed the bar overlapping the **Build** job button).
+- **Food sink: births cost food** — `data/villagers.lua` `birthCost = 15`. Couples only request a child when `count < cap` **and** food ≥ cost; `Villagers.allowBirth(S)` deducts the food; the birth modal shows the cost and disables **Allow** when unaffordable. (More food-costing options to be added later.)
+- **Central horde clock** — top-center `HORDE IN mm:ss` (turns red under 30s) with a `[Space]` hint during the village phase; red `UNDER ATTACK — enemies N` during a wave. The old dim top-left countdown was removed; the boss bar moved down clear of it.
+- **Vessel is now an end-game choice** — the house panel only offers **Choose as vessel / Unchoose vessel** once `Checklist.isDone("stars_right")` (survive the year-6 horde), and you can freely unchoose until conception starts. `Villagers.unchoose` added; `choose` refuses once conceiving/conceived.
+- **Crash fix** — `drawButton` now guards `if b.label` so label-less panel-background buttons (any selection panel) no longer crash on `getWidth(nil)`.
+
+## Content framework (Phase 0) ✅ DONE
+
+Making new **buildings** and **upgrades** data-driven so the ages/research can be added almost entirely in data.
+
+- [x] **Building registry** (`data/buildings.lua`) now carries framework metadata: `name`, `role` (behavior tag: `heart|wall|tower|house|altar|farm|research|graveyard`), `render` (drawer key), `category`, `order`, plus gates (`unlock` milestone, `age` later).
+- [x] **Auto build bar** — generated from `Buildings.buildOrder()` (data, sorted by `order`); numbers `1-9` auto-map; wraps if the list grows. No more hard-coded buttons/keys (`ui.lua`, `main.lua`).
+- [x] **Render dispatch** (`render.lua`) — `RENDERERS[render]` keyed by data, with a **generic fallback** so any new building is visible before custom art.
+- [x] **Role-based behavior** — towers by `role == "tower"`; `popCap` sums any built building's `popCap`; `Buildings.hasRole(role)` helper. New buildings of an existing role are data-only.
+- [x] **Modifier channels** (`src/sim/stats.lua`) — additive bonuses (`towerDamage, towerRate, wallHp, gatherSpeed, buildSpeed, …`); sim reads `Stats.value(channel)`. Towers/walls/gather are wired (no-op until research exists).
+- [x] **In-place building upgrades** — data `upgradeTo = { kind, cost }` + `Buildings.upgrade(i, kind)` (swaps kind, resets to unbuilt so a builder finishes it, keeps position/crew) → this is School → University.
+- [x] **Content-sanity harness** (`--content`) — asserts every building resolves a name/role/render/order and valid `upgradeTo`; prints the build order.
+
+## Ages roadmap
+
+- **Phase 1 — Ages ✅ DONE.** `data/ages.lua` (Whispers → Blood → Bones → Chosen → End) + `sim/ages.lua`. Customs are tagged with an `age` (their objectives). Click the **village heart** → **Ascend**: pay the age's resources + a servant who **walks to the heart and dies**; the age advances with a banner/particles and unlocks land. HUD shows the age; the customs panel is retitled per age with a "Next/Ascend" footer; **buildings gate by `age`** (`Ages.unlocked`, `Ages.lockLabel`); the vessel choice + conception are gated on **reaching Age V**. Saved in the snapshot.
+- **Phase 2 — Research ✅ DONE.** `data/research.lua` + `sim/research.lua`. Research buildings: **School** (Age Blood, 2 researcher slots, tier 1) → **upgraded in place to University** (Age Bones, 4 slots, tier 3). **Timed, worker-driven**: assign servants as researchers (slots); they walk there and add progress (`progress = Σ researcher rate`, so N finish in time/N); cost paid at project start. Catalog: `sharp_bolts`, `swords`, `shields` (Blood) · `cursed_foundations`, `swift_hands` (Bones) · `bloody_rites` (Chosen). Effects feed `Stats` channels; **swords** give servants a melee strike, **shields** reduce damage taken. Panel = project list + progress bar + researcher Assign/Unassign + Upgrade. Saved (purchased ids + per-building project/progress; researcher counts rebuilt on load).
+- **Phase 3 — Farm ✅ DONE.** `farm` building (Age Blood, `role="farm"`, cost 25 wood). On construction completion it registers a **high-yield renewable food node** at its tile (`Nodes.add` — amount 40, regen 0.15, vs berries 15/0.04); villagers gather it like any food node. If the farm is destroyed, its node is removed (`Nodes.removeAt` via the building remove hook). New `Buildings.emitBuilt` hook drives the role effect; `Render.nodes` ignores farm nodes (the building draws the field). Saved via the node + building snapshots.
+- **Phase 4 — Graveyard / bones / necromancy ✅ DONE.** New **bones** resource. **Graveyard** building (Age Bones, `role="graveyard"`): every real servant death (when a graveyard is built) adds **+5 bones** to the stockpile and increments the graveyard's grave count. Its panel raises the dead — **Raise undead (20 bones)** spawns an `undead` villager (sickly-green tint) that works any job but can't couple and doesn't count toward the housing/birth cap. Undead deaths don't count toward the death customs (no cheese). Bones shown in the HUD; saved via stock + villager `undead` flags.
+
+## Combat & family pass ✅ DONE
+
+- **Time freezes under attack.** `Waves:update` only advances the calendar in the village phase — during a horde, months/pregnancy/child-growth/the year all pause until it's cleared.
+- **Mobilize on attack.** `Villagers.mobilize()` (at wave start) saves each servant's job, **fills empty tower slots** (manual crew kept), and sends the surplus to **shelter** at their house (or the heart if unpaired); `demobilize()` (on clear) restores everyone's saved job. Undead mobilize too; servants mid-sacrifice/conception are left alone.
+- **Heal the heart by sacrifice.** The heart sacrifice walk takes a purpose (`ascend`|`heal`). The heart panel gains **Heal (+40) — sacrifice** (repeatable, when hp < max): a servant walks to the heart and dies, restoring 40 hp.
+- **Manual, food-gated birth + confinement.** The random birth popup is gone — the house panel has **Make a child (15 food)** (needs food + pop cap headroom). The mother works normally for the **first half** of the pregnancy; in the second half she's **confined** — drops her job, un-assigns from any tower/research slot, and stays home until the birth (released if the house is lost). Saved via the villager `confined` flag.
+- New `--war` harness verifies all three: `mobilize=true heal=true confine=true`.
+
+## UI redesign — top status bar + bottom command bar ✅ DONE
+
+Reorganized the whole HUD into two fixed zones (all in `src/ui/ui.lua`; `menu.lua` untouched):
+
+- **Top status bar** (`TOP_H = 100`, read-only): age/date (left) · heart hp bar (left) · resources incl. Bones (right) · the horde clock / `UNDER ATTACK` (centre) · next-horde preview (centre, under the clock) · boss bar just below. The objectives panel stays a floating top-right panel (`C`); toasts appear under the bar.
+- **Bottom command bar** (`BOTTOM_H = 138`): **BUILD** on the left — category tabs (**Defense / Economy / Ritual / Research**, from each building's `category`) + a wrapped palette for the active category (name, cost, hotkey, age lock); **ACTIONS** on the right — a title line for the current selection and its buttons (servant jobs; tower crew; house; altar; research + researchers + upgrade; graveyard; heart), laid out in a wrapping grid. Global buttons: **Custom [C]** and **Debug [F3]**.
+- Removed the scattered old UI: the bottom-left build bar, the floating bottom-right selection panel, and the bottom-centre hint lines. Number keys `1-9` now map to the **active category's** buildings. Hover tooltips unchanged.
+- New data helpers: `Buildings.categories()`, `Buildings.buildIn(category)`; `State.buildCategory` (default `defense`).
+
+**Acceptance**: `--shot` screenshot reviewed (top bar, command bar, actions, resources incl. Bones); all harnesses green.
+
+## Interaction & palette pass ✅ DONE
+
+- **Right-click to assign the selected villager** — with a servant selected, right-click a **resource node** to gather it (`tree→wood`, `berry/farm→food`, `rock→stone`), or a **building** to smart-assign (tower→crew, School/University→researcher, Farm→gather its food, under-construction→build; house/altar/graveyard do nothing). The selection is kept so you can chain assignments; right-click empty ground deselects (build-mode right-click still cancels). `State.assignTo` + `Villagers.assignNode/assignBuild/assignCrewTo/assignResearcherTo`.
+- **Selected villager builds a placed building** — place a non-wall building with a servant selected and they're sent to construct it (`buildTarget` set in `State.tryPlace`). Walls stay instant.
+- **Hide locked build content** — the palette shows only **unlocked** (age-reached) buildings; a **category tab is hidden** until it has at least one unlocked building; the active category falls back to the first available. Number keys map to the **unlocked** items of the active category. Unaffordable items remain visible but greyed.
+- New `--assign` harness: `node=true tower=true school=true build=true`.
+
 ## Current State
 
-- **Done**: M1–M7. The plan is complete: full loop to the Antichrist birth, plus particles/shake/flash, procedural SFX, menu/pause/settings, a procedural art pass, and save/load.
-- **Next up**: nothing scheduled. Future polish: a balance pass, drop in real art/audio under `assets/`, and playtest-tune `monthLength`/wave scaling.
-- Test commands: `./run.sh --smoke`, `./run.sh --stress`, `./run.sh --stress2`, `./run.sh --test`, `./run.sh --life`, `./run.sh --menu`, `./run.sh --shot`, `./run.sh --save` (flag files are gitignored and removed after each run).
+- **Done**: M1–M7, the post-M7 fixes, the content framework (Phase 0), and Ages (Phase 1). Full loop to the Antichrist birth, plus juice, audio, menu/save, a data-driven content framework, and a 5-tier Age progression.
+- **Next up**: the planned ages/content roadmap is complete. Future polish: balance pass, real art/audio under `assets/`, more food/bone-costing content, more research/ages, tune `monthLength`/wave scaling.
+- Test commands: `./run.sh --smoke`, `./run.sh --stress`, `./run.sh --stress2`, `./run.sh --test`, `./run.sh --life`, `./run.sh --menu`, `./run.sh --shot`, `./run.sh --save`, `./run.sh --content`, `./run.sh --ages`, `./run.sh --research`, `./run.sh --farm`, `./run.sh --grave`, `./run.sh --war`, `./run.sh --assign` (flag files are gitignored and removed after each run).
 - Title screen on boot (Continue / New Cult / Settings / Quit); `settings.cfg` and `save.dat` live in the LÖVE save dir.
 
 ## Controls (M7c)
 
 | Input | Action |
 |---|---|
-| `1` / `2` / `3` / `4` / `5` | Build wall / arrow tower / ballista / house / altar |
+| `1`–`9` | Build the N-th **unlocked** building of the active build category (bottom-bar tabs; locked items/categories are hidden) |
+| Right-click (servant selected) | Assign the servant to the clicked resource node (gather) or building (crew/research/build/farm) |
+| Bottom-bar buttons | Category tabs · build palette · contextual ACTIONS for the current selection · Custom [C] · Debug [F3] |
 | `B` | Toggle build mode (current type) |
 | Left click villager | Select → job menu (Idle / Wood / Food / Stone / Build); camera follows |
 | Left click defense | Select → crew panel (Assign / Unassign servant) |
-| Left click house | Bind a couple / Choose as vessel / Unbind |
+| Left click village heart | Ascension panel — Ascend to the next age (cost + a servant sacrifice) |
+| Left click School/University | Research panel — pick a project, Assign/Unassign researchers, Upgrade |
+| Left click Graveyard | Necromancy panel — Raise undead (costs bones) |
+| Left click house | Bind a couple / **Make a child (15 food)** / Unbind (Choose·Unchoose vessel only at the end game) |
 | Left click altar | Ritual panel (Burn harvest / Sacrifice / Conceive the Antichrist) |
-| Birth prompt | Allow / Deny a couple's request for a child |
+| Heart panel (second row) | **Heal the Heart** — sacrifice a servant for +40 hp |
+| Birth prompt | Allow (costs food) / Deny a couple's request for a child |
 | Pause overlay | Resume / Save / Settings / Restart / Main Menu |
 | `C` | Toggle the checklist panel |
 | Left click ground | Deselect |

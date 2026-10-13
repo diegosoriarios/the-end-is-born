@@ -53,9 +53,6 @@ local function complete(entry, S)
   stateOf[entry.id] = "done"
   local sub = unlockText(entry)
   toast("THE CUSTOM IS FULFILLED", entry.name .. (sub and ("  —  Unlocked: " .. sub) or ""))
-  if entry.id == "stars_right" then
-    toast("NAME THE VESSEL", "choose a couple, then conceive at the Altar")
-  end
   for i = 1, #entries do
     local e = entries[i]
     if stateOf[e.id] == "hidden" and revealed(e) then
@@ -85,11 +82,7 @@ function Checklist.isDone(id)
   return done[id] == true
 end
 
-function Checklist.canBuild(kind)
-  local d = buildingData[kind]
-  if not d or not d.unlock then return true end
-  return done[d.unlock] == true
-end
+-- Building gating now lives in Ages (Ages.unlocked).
 
 function Checklist.ritualUnlocked()
   return done.raise_altar == true

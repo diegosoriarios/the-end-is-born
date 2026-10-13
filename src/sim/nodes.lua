@@ -32,6 +32,42 @@ function Nodes.generate(village)
   end
 end
 
+-- Runtime-added node (e.g. a built Farm). Returns the new node.
+function Nodes.add(spec, x, y)
+  local nd = {
+    kind = spec.kind or "farm",
+    res = spec.res,
+    x = x, y = y,
+    amount = spec.amount,
+    max = spec.amount,
+    regen = spec.regen or 0,
+    r = spec.r or 8,
+  }
+  Nodes.list[#Nodes.list + 1] = nd
+  return nd
+end
+
+function Nodes.atWorld(x, y)
+  local list = Nodes.list
+  for i = 1, #list do
+    local nd = list[i]
+    if nd.x == x and nd.y == y then return nd end
+  end
+  return nil
+end
+
+function Nodes.removeAt(x, y)
+  local list = Nodes.list
+  for i = #list, 1, -1 do
+    local nd = list[i]
+    if nd.x == x and nd.y == y then
+      table.remove(list, i)
+      return true
+    end
+  end
+  return false
+end
+
 function Nodes.nearest(x, y, res)
   local best, bd = nil, math.huge
   local list = Nodes.list

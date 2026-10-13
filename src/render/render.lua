@@ -8,6 +8,7 @@ local Enemies = require("src.sim.enemies")
 local enemyData = require("src.data.enemies")
 local buildingData = require("src.data.buildings")
 local Checklist = require("src.sim.checklist")
+local Ages = require("src.sim.ages")
 local Particles = require("src.fx.particles")
 
 local Render = {}
@@ -63,6 +64,7 @@ local C = {
   villagerF = { 0.82, 0.46, 0.70 },
   villagerChildM = { 0.66, 0.63, 0.92 },
   villagerChildF = { 0.92, 0.63, 0.85 },
+  undead = { 0.56, 0.70, 0.56 },
   villagerHood = { 0.28, 0.24, 0.52 },
   villagerHoodF = { 0.52, 0.26, 0.44 },
   villagerFace = { 0.07, 0.06, 0.11 },
@@ -91,52 +93,15 @@ local function shadow(x, y, rx, ry)
   love.graphics.ellipse("fill", x, y, rx, ry)
 end
 
-local ENEMY_FEATURES = {
-  grunt = { eyes = true, horns = 1, fangs = false },
-  runner = { eyes = true, horns = 0, fangs = false },
-  brute = { eyes = true, horns = 2, fangs = true },
-  spitter = { bigEye = true },
-  behemoth = { eyes = true, horns = 2, fangs = true, boss = true },
-}
-
-local function paintEnemy(x0, kind, col)
+-- Placeholder: one solid opaque disc per kind (color + size distinguish them).
+local function paintEnemy(x0, col)
   local cx, cy, R = x0 + ENEMY_SPRITE_S / 2, ENEMY_SPRITE_S / 2, 11
-  local f = ENEMY_FEATURES[kind] or ENEMY_FEATURES.grunt
   love.graphics.setColor(col[2])
-  love.graphics.circle("fill", cx, cy, R + 1)
+  love.graphics.circle("fill", cx, cy, R + 1.5)
   love.graphics.setColor(col[1])
   love.graphics.circle("fill", cx, cy, R)
   love.graphics.setColor(col[3])
-  love.graphics.circle("fill", cx - R * 0.32, cy - R * 0.36, R * 0.24)
-  if f.bigEye then
-    love.graphics.setColor(0.06, 0.14, 0.06)
-    love.graphics.circle("fill", cx, cy, 5.2)
-    love.graphics.setColor(0.6, 1, 0.4)
-    love.graphics.circle("fill", cx, cy, 3.2)
-    love.graphics.setColor(0.08, 0.18, 0.08)
-    love.graphics.circle("fill", cx, cy, 1.2)
-  else
-    love.graphics.setColor(0.08, 0.04, 0.07)
-    local eo = f.boss and 4.5 or 3.4
-    love.graphics.circle("fill", cx - eo, cy - 1, f.boss and 3 or 2.4)
-    love.graphics.circle("fill", cx + eo, cy - 1, f.boss and 3 or 2.4)
-    love.graphics.setColor(1, 0.82, 0.3)
-    love.graphics.circle("fill", cx - eo, cy - 1, f.boss and 1.5 or 1.1)
-    love.graphics.circle("fill", cx + eo, cy - 1, f.boss and 1.5 or 1.1)
-  end
-  love.graphics.setColor(col[2])
-  if f.horns == 1 then
-    love.graphics.polygon("fill", cx - 4, cy - 8, cx - 6, cy - 13, cx - 1.5, cy - 9.5)
-    love.graphics.polygon("fill", cx + 4, cy - 8, cx + 6, cy - 13, cx + 1.5, cy - 9.5)
-  elseif f.horns == 2 then
-    love.graphics.polygon("fill", cx - 5, cy - 8, cx - 9, cy - 15, cx - 2, cy - 10)
-    love.graphics.polygon("fill", cx + 5, cy - 8, cx + 9, cy - 15, cx + 2, cy - 10)
-  end
-  if f.fangs then
-    love.graphics.setColor(0.95, 0.94, 0.88)
-    love.graphics.polygon("fill", cx - 3.5, cy + 3, cx - 2, cy + 6.5, cx - 0.5, cy + 3)
-    love.graphics.polygon("fill", cx + 3.5, cy + 3, cx + 2, cy + 6.5, cx + 0.5, cy + 3)
-  end
+  love.graphics.circle("fill", cx - R * 0.32, cy - R * 0.36, R * 0.26)
 end
 
 function Render.initSprites()
@@ -147,7 +112,7 @@ function Render.initSprites()
   love.graphics.setCanvas(atlas)
   local fallback = { { 0.82, 0.20, 0.24 }, { 0.45, 0.08, 0.12 }, { 1, 0.55, 0.55 } }
   for k = 1, K do
-    paintEnemy((k - 1) * ENEMY_SPRITE_S, kinds[k], enemyData[kinds[k]].color or fallback)
+    paintEnemy((k - 1) * ENEMY_SPRITE_S, enemyData[kinds[k]].color or fallback)
   end
   love.graphics.setCanvas()
   kindQuads = {}
@@ -250,7 +215,7 @@ function Render.nodes()
           local a = k * 2.2
           love.graphics.circle("fill", nd.x + math.cos(a) * 4, nd.y + math.sin(a) * 4, 1.7)
         end
-      else
+      elseif nd.kind == "rock" then
         shadow(nd.x, nd.y + 4, 7, 3)
         love.graphics.setColor(C.rockDark)
         love.graphics.polygon("fill", nd.x - 8, nd.y + 5, nd.x - 6, nd.y - 5, nd.x, nd.y - 8, nd.x + 7, nd.y - 3, nd.x + 8, nd.y + 5)
@@ -325,7 +290,9 @@ function Render.villagers(S)
       local bob = math.sin(now * 6 + v.id) * 0.8
       local x, y = v.x, v.y + bob
       shadow(v.x, v.y + v.r, v.r + 1.5, v.r * 0.6)
-      if v.age == "child" then
+      if v.undead then
+        love.graphics.setColor(C.undead)
+      elseif v.age == "child" then
         love.graphics.setColor(v.sex == "f" and C.villagerChildF or C.villagerChildM)
       else
         love.graphics.setColor(v.sex == "f" and C.villagerF or C.villagerM)
@@ -458,50 +425,104 @@ local function drawAltar(x, y)
   love.graphics.rectangle("line", x - 14, y - 9, 28, 19, 3)
 end
 
+local function drawConstruction(x, y, frac)
+  shadow(x, y + 11, 13, 4)
+  love.graphics.setColor(C.construction[1], C.construction[2], C.construction[3], 0.3 + 0.35 * frac)
+  love.graphics.rectangle("fill", x - 12, y - 12, 24, 24, 3)
+  love.graphics.setColor(C.construct)
+  love.graphics.setLineWidth(1)
+  love.graphics.rectangle("line", x - 12, y - 12, 24, 24, 3)
+  love.graphics.line(x - 12, y - 12, x + 12, y + 12)
+  love.graphics.line(x + 12, y - 12, x - 12, y + 12)
+  love.graphics.setColor(C.hpBarBack)
+  love.graphics.rectangle("fill", x - 12, y + 14, 24, 3)
+  love.graphics.setColor(C.hpBar)
+  love.graphics.rectangle("fill", x - 12, y + 14, 24 * frac, 3)
+end
+
+-- Generic fallback so a brand-new building is visible before custom art.
+local function drawGeneric(x, y, d)
+  local col = d and d.color or { 0.55, 0.5, 0.62 }
+  shadow(x, y + 10, 12, 4)
+  love.graphics.setColor(col[1] * 0.55, col[2] * 0.55, col[3] * 0.55)
+  love.graphics.rectangle("fill", x - 12, y - 12, 24, 24, 3)
+  love.graphics.setColor(col)
+  love.graphics.rectangle("fill", x - 10, y - 10, 20, 20, 3)
+  love.graphics.setColor(0.1, 0.1, 0.12)
+  love.graphics.setLineWidth(1)
+  love.graphics.rectangle("line", x - 12, y - 12, 24, 24, 3)
+end
+
+local function drawFarm(x, y)
+  shadow(x, y + 10, 13, 4)
+  love.graphics.setColor(0.34, 0.24, 0.14)
+  love.graphics.rectangle("fill", x - 13, y - 9, 26, 20, 3)
+  love.graphics.setColor(0.30, 0.45, 0.20)
+  for r = 0, 2 do
+    love.graphics.rectangle("fill", x - 11, y - 7 + r * 6, 22, 3, 1)
+  end
+  love.graphics.setColor(0.60, 0.78, 0.38)
+  for r = 0, 2 do
+    for c = -2, 2 do
+      love.graphics.circle("fill", x + c * 5, y - 5.5 + r * 6, 1.4)
+    end
+  end
+  love.graphics.setColor(0.12, 0.09, 0.06)
+  love.graphics.setLineWidth(1)
+  love.graphics.rectangle("line", x - 13, y - 9, 26, 20, 3)
+end
+
+local function drawGraveyard(x, y)
+  shadow(x, y + 10, 14, 4)
+  love.graphics.setColor(0.20, 0.20, 0.24)
+  love.graphics.rectangle("fill", x - 14, y - 10, 28, 22, 3)
+  love.graphics.setColor(0.32, 0.32, 0.38)
+  local graves = { { -8, -4 }, { -2, -6 }, { 4, -3 }, { 9, -6 } }
+  for i = 1, #graves do
+    love.graphics.rectangle("fill", x + graves[i][1] - 2, y + graves[i][2] - 3, 4, 8, 1)
+  end
+  love.graphics.setColor(0.45, 0.5, 0.45)
+  love.graphics.circle("fill", x - 8, y - 8, 1)
+  love.graphics.setColor(0.12, 0.09, 0.06)
+  love.graphics.setLineWidth(1)
+  love.graphics.rectangle("line", x - 14, y - 10, 28, 22, 3)
+end
+
+-- render key (from data) -> drawer; anything missing uses drawGeneric.
+local RENDERERS = {
+  house = drawHouse,
+  altar = drawAltar,
+  farm = drawFarm,
+  graveyard = drawGraveyard,
+  arrow_tower = function(x, y) drawTower(x, y, false) end,
+  ballista = function(x, y) drawTower(x, y, true) end,
+}
+
 function Render.buildings(S)
   local B = Buildings
   local sel = S.selection and S.selection.building or nil
   love.graphics.setLineWidth(1)
   for i = 1, B.n do
     local x, y, kind = B.x[i], B.y[i], B.kind[i]
+    local d = buildingData[kind]
     if not B.built[i] then
-      local d = buildingData[kind]
-      local frac = B.progress[i] / d.buildTime
-      shadow(x, y + 11, 13, 4)
-      love.graphics.setColor(C.construction[1], C.construction[2], C.construction[3], 0.3 + 0.35 * frac)
-      love.graphics.rectangle("fill", x - 12, y - 12, 24, 24, 3)
-      love.graphics.setColor(C.construct)
-      love.graphics.setLineWidth(1)
-      love.graphics.rectangle("line", x - 12, y - 12, 24, 24, 3)
-      love.graphics.line(x - 12, y - 12, x + 12, y + 12)
-      love.graphics.line(x + 12, y - 12, x - 12, y + 12)
-      love.graphics.setColor(C.hpBarBack)
-      love.graphics.rectangle("fill", x - 12, y + 14, 24, 3)
-      love.graphics.setColor(C.hpBar)
-      love.graphics.rectangle("fill", x - 12, y + 14, 24 * frac, 3)
-    elseif kind == "house" then
-      drawHouse(x, y)
-      if B.flash[i] > 0 then
-        love.graphics.setColor(C.wallFlash[1], C.wallFlash[2], C.wallFlash[3], math.min(1, B.flash[i] * 8))
-        love.graphics.rectangle("fill", x - 12, y - 17, 24, 30, 2)
-      end
-    elseif kind == "altar" then
-      drawAltar(x, y)
-      if B.flash[i] > 0 then
-        love.graphics.setColor(C.wallFlash[1], C.wallFlash[2], C.wallFlash[3], math.min(1, B.flash[i] * 8))
-        love.graphics.rectangle("fill", x - 14, y - 14, 28, 25, 2)
-      end
+      drawConstruction(x, y, math.min(1, B.progress[i] / (d.buildTime or 1)))
     else
-      local isBallista = kind == "ballista"
-      drawTower(x, y, isBallista)
-      local half = isBallista and 13 or 12
-      if B.crewCount[i] < B.maxCrew[i] then
-        love.graphics.setColor(C.offline)
-        love.graphics.setLineWidth(2)
-        love.graphics.line(x - 8, y - 8, x + 8, y + 8)
+      local draw = RENDERERS[d.render or kind] or drawGeneric
+      draw(x, y, d)
+      if d.role == "tower" then
+        local half = (d.render == "ballista") and 13 or 12
+        if B.crewCount[i] < B.maxCrew[i] then
+          love.graphics.setColor(C.offline)
+          love.graphics.setLineWidth(2)
+          love.graphics.line(x - 8, y - 8, x + 8, y + 8)
+        end
+        crewPips(x, y + half + 7, B.crewCount[i], B.maxCrew[i])
+      elseif d.role == "research" then
+        crewPips(x, y + 18, B.researchers[i] or 0, d.researchSlots or 0)
       end
-      crewPips(x, y + half + 7, B.crewCount[i], B.maxCrew[i])
       if B.flash[i] > 0 then
+        local half = d.role == "tower" and ((d.render == "ballista") and 13 or 12) or 14
         love.graphics.setColor(C.wallFlash[1], C.wallFlash[2], C.wallFlash[3], math.min(1, B.flash[i] * 8))
         love.graphics.rectangle("fill", x - half, y - half, half * 2, half * 2, 3)
       end
@@ -590,7 +611,7 @@ function Render.ghost(S)
   if t == "wall" then
     ok = Walls.canPlace(gx, gy) and S.canAfford(buildingData.wall.cost)
   else
-    ok = Checklist.canBuild(t) and Buildings.canPlace(gx, gy, S.village) and S.canAfford(buildingData[t].cost)
+    ok = Ages.unlocked(t) and Buildings.canPlace(gx, gy, S.village) and S.canAfford(buildingData[t].cost)
   end
   love.graphics.setColor(ok and C.ghostOk or C.ghostBad)
   love.graphics.rectangle("fill", gx * Grid.TILE, gy * Grid.TILE, Grid.TILE, Grid.TILE)

@@ -146,11 +146,14 @@ end
 
 function Waves:update(dt, ctx)
   local cal = self.calendar
-  cal:update(dt)
+  -- Time freezes while under attack: the calendar only advances in the
+  -- village phase, so pregnancies/growth/the year pause during a wave.
   if self.phase == "village" then
+    cal:update(dt)
     if cal.hordeDue then
       cal.hordeDue = false
       self:startWave()
+      ctx.villagers.mobilize()
     end
     return
   end
@@ -165,6 +168,7 @@ function Waves:update(dt, ctx)
   if self.ti > total and ctx.enemies.n == 0 then
     self.phase = "village"
     self.bossKind = nil
+    ctx.villagers.demobilize()
     if not cal.apocalypse then
       self.hordesSurvived = math.max(self.hordesSurvived, self.number)
       if waveData.victoryYear and self.number >= waveData.victoryYear then

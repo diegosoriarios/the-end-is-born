@@ -3,6 +3,7 @@ local Buildings = require("src.sim.buildings")
 local Enemies = require("src.sim.enemies")
 local Particles = require("src.fx.particles")
 local Audio = require("src.audio.audio")
+local Stats = require("src.sim.stats")
 
 local Towers = { shots = 0 }
 
@@ -48,7 +49,7 @@ function Towers.update(dt, hash, projectiles)
         hash:queryCircle(B.x[i], B.y[i], d.range, probeCallback)
         local j = probeBest
         if j > 0 then
-          B.cd[i] = d.fireInterval
+          B.cd[i] = d.fireInterval / Stats.value("towerRate")
           Towers.shots = Towers.shots + 1
           Particles.muzzle(B.x[i], B.y[i], E.x[j] - B.x[i], E.y[j] - B.y[i], "spark")
           Audio.play(B.kind[i] == "ballista" and "ballista" or "shoot")
@@ -56,7 +57,7 @@ function Towers.update(dt, hash, projectiles)
           projectiles.spawn(B.x[i], B.y[i],
             E.x[j] + E.hx[j] * E.speed[j] * flight,
             E.y[j] + E.hy[j] * E.speed[j] * flight,
-            d.projectileSpeed, d.damage)
+            d.projectileSpeed, d.damage * Stats.value("towerDamage"))
         end
       end
     end
