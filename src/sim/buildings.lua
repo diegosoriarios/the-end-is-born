@@ -70,6 +70,7 @@ function Buildings.emitBuilt(i)
 end
 
 local function changed()
+  Grid.touch()
   if onRebuild then onRebuild() end
 end
 
@@ -80,6 +81,7 @@ function Buildings.clear()
     Grid.occupancy[c] = Grid.OCC_NONE
   end
   Buildings.n = 0
+  Grid.touch()
 end
 
 function Buildings.at(gx, gy)
@@ -192,14 +194,14 @@ function Buildings.load(list)
     Buildings.built[i] = b.built
     Buildings.flash[i] = 0
     Buildings.crewCount[i] = b.crewCount or 0
-    Buildings.maxCrew[i] = b.maxCrew or 0
+    Buildings.maxCrew[i] = b.maxCrew or (buildingData[b.kind].crew or 0)
     Buildings.cd[i] = b.cd or 0
     Buildings.role[i] = buildingData[b.kind].role
     Buildings.isTower[i] = Buildings.role[i] == "tower"
     Buildings.project[i] = b.project
     Buildings.rprogress[i] = b.rprogress or 0
     Buildings.researchers[i] = 0
-    Buildings.graves[i] = 0
+    Buildings.graves[i] = b.graves or 0
     local c = Grid.cellIndex(b.gx, b.gy)
     index[c] = i
     Grid.occupancy[c] = Grid.OCC_BUILD

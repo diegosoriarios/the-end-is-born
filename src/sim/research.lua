@@ -5,6 +5,7 @@
 local researchData = require("src.data.research")
 local buildingData = require("src.data.buildings")
 local Buildings = require("src.sim.buildings")
+local Villagers = require("src.sim.villagers")
 local Ages = require("src.sim.ages")
 local Stats = require("src.sim.stats")
 local Checklist = require("src.sim.checklist")
@@ -20,7 +21,13 @@ end
 
 function Research.load(ids)
   Research.purchased = {}
-  for i = 1, #(ids or {}) do Research.purchased[ids[i]] = true end
+  for i = 1, #(ids or {}) do
+    local id = ids[i]
+    Research.purchased[id] = true
+    -- Re-apply effects: Stats was cleared by State.reset() before restore.
+    local def = researchData[id]
+    if def then Stats.apply(def.effect) end
+  end
 end
 
 function Research.has(id) return Research.purchased[id] == true end
@@ -90,7 +97,7 @@ function Research.update(dt, S)
       local id = Buildings.project[i]
       if id then
         local def = researchData[id]
-        local rate = Buildings.researchers[i] or 0
+        local rate = Villagers.researchRateAt(i)
         if rate > 0 then
           Buildings.rprogress[i] = Buildings.rprogress[i] + rate * RESEARCH_RATE * dt
           if Buildings.rprogress[i] >= def.time then

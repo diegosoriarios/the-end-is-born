@@ -10,4 +10,5 @@ return {
   growMonths = 12,
   askEvery = 6,
   childR = 3,
+  unionWorkMul = 1.15,
 }

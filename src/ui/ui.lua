@@ -192,12 +192,30 @@ local function buildActions(S)
     end
   elseif sel.villager then
     local v = sel.villager
+    local c = Villagers.coupleOf(v)
     if v.age == "child" then
       actionTitle = ("Child — grows up in %d months"):format(math.max(0, v.growLeft))
     else
       actionTitle = ("Servant — %s"):format(Villagers.jobLabel(v))
+      if c then
+        if not c.fertile then
+          actionTitle = actionTitle .. " · devoted (+15% work)"
+        else
+          local mother = Villagers.coupleMother(c)
+          if mother == v and c.conceived then
+            actionTitle = actionTitle .. " · VESSEL"
+          elseif mother == v and c.pregnant then
+            actionTitle = actionTitle .. (" · with child (%d months)"):format(math.max(0, c.monthsLeft))
+          end
+        end
+      end
       for _, job in ipairs({ "idle", "wood", "food", "stone", "build" }) do
         act(JOB_LABEL[job], { villagerJob = job, villager = v }, v.confined, v.job == job)
+      end
+      if not c and not v.undead and not v.confined then
+        local pp = S.pairPick or {}
+        local picked = pp.a == v or pp.b == v
+        act(picked and "Clear partner mark" or "Mark as partner", { pickPartner = v }, false, picked)
       end
     end
   elseif sel.building then
@@ -211,19 +229,34 @@ local function buildActions(S)
     elseif kind == "house" then
       local c = Villagers.coupleAt(bi)
       local vesselStage = Ages.reached("end")
-      actionTitle = "House — " .. (c and "bound" or "empty") .. " · +2 pop"
+      local status = "empty"
       if c then
-        if not c.pregnant and not c.conceived and not c.conceiving then
+        if not c.fertile then status = "bonded"
+        elseif c.conceived then status = "vessel"
+        elseif c.pregnant then status = "expecting"
+        else status = "bound" end
+      end
+      actionTitle = "House — " .. status .. " · +2 pop"
+      if c then
+        if c.fertile and not c.pregnant and not c.conceived and not c.conceiving then
           local cost = vData.birthCost or 0
           local canChild = (S.stock.food or 0) >= cost and Villagers.population() < Buildings.popCap()
           act("Make a child (" .. cost .. "f)", { makeChild = bi }, not canChild)
         end
-        if vesselStage and not (c.conceived or c.conceiving) then
-          act(c.chosen and "Unchoose vessel" or "Choose as vessel", { chooseCouple = bi }, false, c.chosen)
+        if c.fertile and vesselStage and not (c.conceived or c.conceiving) then
+          act(Villagers.vesselId == c.id and "Unchoose vessel" or "Choose as vessel",
+            { chooseCouple = bi }, false, Villagers.vesselId == c.id)
+        end
+        if not c.fertile then
+          act("Devoted household · +15% work", nil, true, true)
         end
         act("Unbind", { unbindCouple = bi }, c.conceived or c.conceiving or (c.chosen and c.pregnant))
       else
-        act("Bind a couple", { bindCouple = bi }, not (Villagers.freeAdult("m") and Villagers.freeAdult("f")))
+        local pp = S.pairPick or {}
+        act("Bind chosen pair", { bindPair = bi }, not Villagers.canBindPair(pp.a, pp.b))
+        if not (pp.a and pp.b) then
+          act("Mark two servants as partners", nil, true)
+        end
       end
     elseif Buildings.role[bi] == "graveyard" then
       actionTitle = ("Graveyard — %d graves"):format(Buildings.graves[bi] or 0)
@@ -337,6 +370,24 @@ function UI.handleClick(mx, my, S)
         if v then Villagers.startSacrifice(v, b.ritualSacrifice) end
       elseif b.ritualConceive then
         Villagers.startConception(b.ritualConceive)
+      elseif b.pickPartner then
+        local v = b.pickPartner
+        local pp = S.pairPick or {}
+        if pp.a == v then
+          pp.a = nil
+        elseif pp.b == v then
+          pp.b = nil
+        elseif not pp.a then
+          pp.a = v
+        elseif not pp.b then
+          pp.b = v
+        else
+          pp.a, pp.b = v, nil
+        end
+        S.pairPick = pp
+      elseif b.bindPair then
+        local pp = S.pairPick or {}
+        if Villagers.bindCoupleTo(b.bindPair, pp.a, pp.b) then S.pairPick = {} end
       elseif b.bindCouple then
         Villagers.bindCouple(b.bindCouple)
       elseif b.unbindCouple then

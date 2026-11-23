@@ -1,9 +1,14 @@
-local Grid = { TILE = 32, WIDTH = 64, HEIGHT = 64, EDGE_MARGIN = 2 }
+local Grid = { TILE = 32, WIDTH = 64, HEIGHT = 64, EDGE_MARGIN = 2, version = 0 }
 
 Grid.OCC_NONE = 0
 Grid.OCC_WALL = 1
 Grid.OCC_VILLAGE = 2
 Grid.OCC_BUILD = 3
+
+-- Occupancy changes bump `version` so cached villager paths can be discarded.
+function Grid.touch()
+  Grid.version = Grid.version + 1
+end
 
 function Grid.resetOccupancy()
   local occ = Grid.occupancy
@@ -12,6 +17,7 @@ function Grid.resetOccupancy()
     Grid.occupancy = occ
   end
   for i = 1, Grid.WIDTH * Grid.HEIGHT do occ[i] = Grid.OCC_NONE end
+  Grid.touch()
 end
 
 function Grid.cellIndex(gx, gy) return gy * Grid.WIDTH + gx + 1 end
@@ -42,6 +48,31 @@ end
 function Grid.occAtTile(gx, gy)
   if not Grid.inBounds(gx, gy) then return Grid.OCC_WALL end
   return Grid.occupancy[Grid.cellIndex(gx, gy)]
+end
+
+function Grid.isSolidTile(gx, gy)
+  local o = Grid.occAtTile(gx, gy)
+  return o == Grid.OCC_WALL or o == Grid.OCC_BUILD
+end
+
+-- Nearest walkable tile, searched in growing square rings. Returns nil when the
+-- whole searched area is solid (caller treats the goal as unreachable).
+function Grid.nearestFree(gx, gy, maxRings)
+  if not Grid.isSolidTile(gx, gy) then return gx, gy end
+  local rings = maxRings or 10
+  for r = 1, rings do
+    for dy = -r, r do
+      for dx = -r, r do
+        if math.max(math.abs(dx), math.abs(dy)) == r then
+          local nx, ny = gx + dx, gy + dy
+          if Grid.inBounds(nx, ny) and not Grid.isSolidTile(nx, ny) then
+            return nx, ny
+          end
+        end
+      end
+    end
+  end
+  return nil
 end
 
 function Grid.cellsInCircle(cx, cy, r)

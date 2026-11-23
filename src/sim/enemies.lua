@@ -187,24 +187,34 @@ local function update(dt, ctx)
     local d2v = dxv * dxv + dyv * dyv
     local stop = v.r + E.r[i]
     local rng = rangeOf[kindI]
-    if rng > 0 and d2v < (rng + v.r) * (rng + v.r) then
+    local pv = nil
+    if rng > 0 then
+      pvX, pvY, pvRange = xi, yi, rng
+      pv = villagerNear(ctx)
+    end
+    if rng > 0 and (pv or d2v < (rng + v.r) * (rng + v.r)) then
       E.blk[i] = 0
       E.attackTimer[i] = E.attackTimer[i] - dt
       if E.attackTimer[i] <= 0 then
         E.attackTimer[i] = attackInterval[kindI]
-        local tx, ty = v.x, v.y
-        local best, bd = 0, rng * rng
-        for b = 1, Buildings.n do
-          local dx = Buildings.x[b] - xi
-          local dy = Buildings.y[b] - yi
-          local d2 = dx * dx + dy * dy
-          if d2 < bd then
-            bd = d2
-            best = b
+        local tx, ty
+        if pv then
+          tx, ty = pv.x, pv.y
+        else
+          tx, ty = v.x, v.y
+          local best, bd = 0, rng * rng
+          for b = 1, Buildings.n do
+            local dx = Buildings.x[b] - xi
+            local dy = Buildings.y[b] - yi
+            local d2 = dx * dx + dy * dy
+            if d2 < bd then
+              bd = d2
+              best = b
+            end
           end
-        end
-        if best > 0 then
-          tx, ty = Buildings.x[best], Buildings.y[best]
+          if best > 0 then
+            tx, ty = Buildings.x[best], Buildings.y[best]
+          end
         end
         Shots.spawn(xi, yi, tx, ty, projSpeed[kindI], E.dmg[i])
       end
@@ -332,6 +342,34 @@ local function update(dt, ctx)
           end
         end
       end
+    end
+  end
+end
+
+function Enemies.load(list, kills)
+  local E = Enemies
+  E.n = 0
+  E.kills = kills or 0
+  for i = 1, #(list or {}) do
+    local r = list[i]
+    local kindI = kindIndex[r.kind]
+    local d = enemyData[r.kind]
+    if kindI and d then
+      E.n = E.n + 1
+      local j = E.n
+      E.x[j] = r.x
+      E.y[j] = r.y
+      E.hx[j] = r.hx or 1
+      E.hy[j] = r.hy or 0
+      E.hp[j] = r.hp
+      E.maxHp[j] = r.maxHp or r.hp
+      E.speed[j] = d.speed
+      E.r[j] = d.r
+      E.dmg[j] = d.damage
+      E.attackTimer[j] = r.attackTimer or d.attackInterval
+      E.hitFlash[j] = 0
+      E.kind[j] = kindI
+      E.blk[j] = r.blk or 0
     end
   end
 end

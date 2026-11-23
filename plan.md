@@ -30,7 +30,10 @@ A 2D top-down village builder / tower defense with a dark twist: you are the lea
   - `./run.sh --life` — couple/birth validation: binds 2 couples, conceives the vessel at the altar, fast-forwards 9 months, checks the Antichrist birth victory.
   - `./run.sh --menu` — boots to the title, opens/closes the settings screen, exercises the menu draw/hit paths, quits. Also captures `menu_title.png` / `menu_settings.png`.
   - `./run.sh --shot` — builds a small scene and captures `shot.png` (game view) to the save dir for visual checks.
-  - `./run.sh --save` — builds a scene, saves, wipes it, loads, and asserts the round-trip matches.
+  - `./run.sh --save` — builds a scene with a live wave, saves, wipes it, loads, and asserts the round-trip (including enemies/projectiles/shots/mobilization) matches.
+  - `./run.sh --path` — walls off a resource node and asserts a servant paths around it without entering solid tiles.
+  - `./run.sh --spit` — asserts a spitter prioritises an in-range servant over the heart.
+  - `./run.sh --pair` — validates manual opposite-sex and same-sex bindings, the +15% work buff, fertility gating, and vessel selection.
 - **Performance strategy (non-negotiables for thousands of enemies)**:
   - `SpriteBatch` rendering — one batched draw call per atlas
   - Data-oriented enemy storage — flat arrays, no metatable-heavy OOP in the hot loop
@@ -114,7 +117,7 @@ Implementation notes:
 - Towers fire only when `built && crewCount >= crew` (`src/sim/towers.lua` now iterates the Buildings registry).
 - Buildings occupy their tile (`OCC_BUILD`) — block enemies and the flow field (same +60 wall cost); enemies bash them when blocked.
 - Costs are deducted at placement; walls build instantly (palisade), towers/houses/ballista need a builder (Build job).
-- **Known M3 caveats**: villagers walk in straight lines and pass through walls (placeholder — outbound pathing arrives later); enemies ignore villagers unless in melee range while attacking/blocked; no enemy targeting of villagers at range; sleeping is cosmetic idling.
+- **Known M3 caveats**: villagers use throttled A* pathfinding (`src/sim/path.lua`) with per-axis collision and crowd separation, so they route around walls/buildings instead of walking through them; ranged enemies (spitters) now prioritise villagers in range, then buildings, then the heart; sleeping is cosmetic idling.
 
 **Known M2 caveats (partially addressed)**
 
@@ -140,9 +143,9 @@ Implementation notes:
 
 Implementation notes:
 - `Waves.preview()` is the single wave-definition resolver shared by startWave and the HUD (apocalypse-aware).
-- Spitters only besiege when within `range` of the village heart; if blocked outside it they melee as usual. They never target villagers at range (shots land positionally, so a passing villager can be clipped).
+- Spitters prioritise the nearest villager in range, then the nearest building, then the heart; shots still resolve positionally on impact. They only besiege when a target is in range.
 - Calendar never pauses (horde chaining if a wave outlasts the year); `hordeDue` is consumed by Waves only when idle, so overdue hordes fire back-to-back.
-- **Known M4 caveats**: no enemy type targets villagers at range; boss bar is a combined bar across all alive bosses; apocalypse win/lose integration lands in M5/M6.
+- **Known M4 caveats**: spitters now target villagers at range (villager > building > heart); boss bar is a combined bar across all alive bosses; apocalypse win/lose integration lands in M5/M6.
 
 ### M5 — The Antichrist checklist ✅ DONE
 
@@ -167,7 +170,7 @@ Implementation notes:
 
 ### M6 — Couples, births, and the Antichrist ending ✅ DONE
 
-- [x] House panel: **Bind a couple** (nearest free adult man + woman), **Choose as vessel**, **Unbind**. Couples dissolve if their house is destroyed or a partner dies.
+- [x] House panel: **Mark two servants as partners** then **Bind chosen pair**, **Choose as vessel**, **Unbind**. Same-sex pairs may bind (no children; both work +15%), and couples dissolve if their house is destroyed or a partner dies.
 - [x] Approval loop: bound couples periodically ask permission for a child → centered **Allow / Deny** popup; denying resets the timer.
 - [x] Children: born as small pale `child` villagers, count toward the cap, cannot work/crew/sacrifice; grow into adult workers after a year. Births stall if the village is at population cap.
 - [x] Pregnancy lasts 9 continuous in-game months (`vData.pregnancyMonths`); the calendar keeps ticking through village *and* wave phases via a month `epoch` counter.
@@ -182,7 +185,7 @@ Implementation notes:
 Implementation notes:
 - `src/sim/villagers.lua` owns couples, births, growth, and conception; `Calendar.epoch` drives month ticks for pregnancies/growth (survives `Space` skips).
 - The Altar's conceive ritual walks both partners to the altar (job `conceive`); losing a partner mid-walk just cancels the rite.
-- **Known M6 caveats**: couples are pair-picked automatically (no manual pairing UI); the chosen vessel is a single global flag; no pregnancy visuals beyond house-panel status text.
+- **Known M6 caveats**: pairing is manual (mark two free adults, then the house); same-sex unions cannot conceive or become the vessel but get a pair-local +15% work bonus; the vessel is tracked explicitly as `Villagers.vesselId`; pregnancy/vessel visuals are draw-only rings and a belly marker.
 
 ### M7 — Juice & art direction ✅ DONE
 
@@ -232,10 +235,10 @@ Implementation notes:
 #### M7e — Save / load ✅ DONE
 
 - [x] `src/core/save.lua`: hand-rolled recursive serializer/parser for numbers/strings/booleans/nested tables — no dependency, no code execution. Reads/writes `save.dat` in the LÖVE save dir.
-- [x] `src/core/persistence.lua`: `snapshot`/`restore` of primitives only (calendar, stock, village, camera, buildings, walls, nodes, villagers, couples, checklist ids + counters, wave phase/timeline), all references by id/index. Restore replays onto a fresh `reset()` world and rebakes the flow field.
-- [x] New `load` functions: `Buildings.load`, `Walls.load`, `Villagers.load` (rebuilds couples/marriage), `Checklist.load` (done ids + counters).
-- [x] Saves allowed in the **village phase** only; autosave at each new year + manual **Save** in the pause menu; main-menu **Continue** appears when `save.dat` exists.
-- [x] New `--save` harness: builds a scene, saves, wipes it, loads, and asserts the state matches.
+- [x] `src/core/persistence.lua`: `snapshot`/`restore` of primitives only (calendar, stock, village, camera, buildings, walls, nodes, villagers + mobilization, couples, checklist ids + counters, enemies, tower projectiles, spitter shots, wave phase/clock/timeline), all references by id/index. Restore replays onto a fresh `reset()` world and rebakes the flow field.
+- [x] New `load` functions: `Buildings.load`, `Walls.load`, `Villagers.load` (rebuilds couples/marriage/mobilization), `Enemies.load`, `Projectiles.load`, `EnemyShots.load`, `Checklist.load` (done ids + counters).
+- [x] Saves allowed **any time during play**, including mid-horde; autosave at each new year + manual **Save** in the pause menu; main-menu **Continue** appears when `save.dat` exists. Snapshot format v2 accepts v1 saves.
+- [x] New `--save` harness: builds a scene, starts a wave with live enemies/projectiles/shots, saves, wipes it, loads, and asserts the round-trip (including phase/clock/actors/mobilization) matches.
 
 **Acceptance**: `--save` round-trips exactly (`match=true`); all other harnesses green; menu shows Continue when a save exists.
 
@@ -299,7 +302,7 @@ Reorganized the whole HUD into two fixed zones (all in `src/ui/ui.lua`; `menu.lu
 
 - **Done**: M1–M7, the post-M7 fixes, the content framework (Phase 0), and Ages (Phase 1). Full loop to the Antichrist birth, plus juice, audio, menu/save, a data-driven content framework, and a 5-tier Age progression.
 - **Next up**: the planned ages/content roadmap is complete. Future polish: balance pass, real art/audio under `assets/`, more food/bone-costing content, more research/ages, tune `monthLength`/wave scaling.
-- Test commands: `./run.sh --smoke`, `./run.sh --stress`, `./run.sh --stress2`, `./run.sh --test`, `./run.sh --life`, `./run.sh --menu`, `./run.sh --shot`, `./run.sh --save`, `./run.sh --content`, `./run.sh --ages`, `./run.sh --research`, `./run.sh --farm`, `./run.sh --grave`, `./run.sh --war`, `./run.sh --assign` (flag files are gitignored and removed after each run).
+- Test commands: `./run.sh --smoke`, `./run.sh --stress`, `./run.sh --stress2`, `./run.sh --test`, `./run.sh --life`, `./run.sh --menu`, `./run.sh --shot`, `./run.sh --save`, `./run.sh --content`, `./run.sh --ages`, `./run.sh --research`, `./run.sh --farm`, `./run.sh --grave`, `./run.sh --war`, `./run.sh --assign`, `./run.sh --path`, `./run.sh --spit`, `./run.sh --pair` (flag files are gitignored and removed after each run).
 - Title screen on boot (Continue / New Cult / Settings / Quit); `settings.cfg` and `save.dat` live in the LÖVE save dir.
 
 ## Controls (M7c)
@@ -315,7 +318,7 @@ Reorganized the whole HUD into two fixed zones (all in `src/ui/ui.lua`; `menu.lu
 | Left click village heart | Ascension panel — Ascend to the next age (cost + a servant sacrifice) |
 | Left click School/University | Research panel — pick a project, Assign/Unassign researchers, Upgrade |
 | Left click Graveyard | Necromancy panel — Raise undead (costs bones) |
-| Left click house | Bind a couple / **Make a child (15 food)** / Unbind (Choose·Unchoose vessel only at the end game) |
+| Left click house | Mark two servants as partners → Bind chosen pair / **Make a child (15 food)** / Unbind (Choose·Unchoose vessel only at the end game; same-sex unions get +15% work) |
 | Left click altar | Ritual panel (Burn harvest / Sacrifice / Conceive the Antichrist) |
 | Heart panel (second row) | **Heal the Heart** — sacrifice a servant for +40 hp |
 | Birth prompt | Allow (costs food) / Deny a couple's request for a child |

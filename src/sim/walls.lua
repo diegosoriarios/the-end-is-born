@@ -12,6 +12,7 @@ local onRebuild = nil
 function Walls.setRebuildHook(fn) onRebuild = fn end
 
 local function changed()
+  Grid.touch()
   if onRebuild then onRebuild() end
 end
 
@@ -22,6 +23,7 @@ function Walls.clear()
     Grid.occupancy[c] = Grid.OCC_NONE
   end
   Walls.n = 0
+  Grid.touch()
 end
 
 function Walls.at(gx, gy)

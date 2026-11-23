@@ -100,7 +100,7 @@ function Menu.handleClick(mx, my, S)
         if Persistence.save(S) then
           Checklist.notice("THE CULT ENDURES", "progress carved into the dark")
         else
-          Checklist.notice("THE RITE FAILS", "progress can only be saved between hordes")
+          Checklist.notice("THE RITE FAILS", "the world is not ready to be saved")
         end
       elseif a == "quit" then
         love.event.quit()

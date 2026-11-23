@@ -90,6 +90,7 @@ function State.reset()
   State.debug = false
   State.accumulator = 0
   State.selection = nil
+  State.pairPick = {}
   State.follow = false
   State.checklistVisible = true
   Grid.resetOccupancy()
@@ -214,6 +215,19 @@ function State.reset()
   elseif love.filesystem.getInfo("assign.flag") then
     State.assign = 20
     State.assignAction = 10
+  elseif love.filesystem.getInfo("path.flag") then
+    State.path = 900
+    State.pathAction = 840
+    State.pathReached = false
+    State.pathSolid = false
+    State.pathWallCount = 0
+  elseif love.filesystem.getInfo("spit.flag") then
+    State.spit = 600
+    State.spitAction = 540
+    State.spitOk = false
+  elseif love.filesystem.getInfo("pair.flag") then
+    State.pair = 10
+    State.pairAction = 5
   elseif love.filesystem.getInfo("smoke.flag") then
     State.smoke = 2600
     State.smokeAction = 2570
@@ -236,7 +250,7 @@ function State.reset()
     State.lifePhase = "setup"
     State.lifeGestate = nil
   end
-  State.harness = (State.smoke or State.stress or State.stress2 or State.test or State.life or State.menu or State.shot or State.save or State.content or State.ages or State.research or State.farm or State.grave or State.war or State.assign) and true or false
+  State.harness = (State.smoke or State.stress or State.stress2 or State.test or State.life or State.menu or State.shot or State.save or State.content or State.ages or State.research or State.farm or State.grave or State.war or State.assign or State.path or State.spit or State.pair) and true or false
   State.paused = false
   State._savedYear = State.waves.calendar.year
   State._pendingSave = false
@@ -452,28 +466,59 @@ local function saveUpdate()
   if State.saveAction and State.save == State.saveAction then
     v.hp, v.maxHp = 1e9, 1e9
     State.stock.wood, State.stock.food = 777, 555
+    State.stock.bone = 42
     local hx, hy = Grid.worldToTile(v.x + 4 * Grid.TILE, v.y)
     local house = Buildings.place(hx, hy, "house", true)
     local ax, ay = Grid.worldToTile(v.x, v.y + 4 * Grid.TILE)
     Buildings.place(ax, ay, "altar", true)
     local bx, by = Grid.worldToTile(v.x - 4 * Grid.TILE, v.y)
-    Buildings.place(bx, by, "arrow_tower", true)
+    local tower = Buildings.place(bx, by, "arrow_tower", true)
+    local gx, gy = Grid.worldToTile(v.x + 4 * Grid.TILE, v.y + 4 * Grid.TILE)
+    local grave = Buildings.place(gx, gy, "graveyard", true)
+    Buildings.graves[grave] = 7
+    Research.purchased["sharp_bolts"] = true
+    Stats.apply(Research.def("sharp_bolts").effect)
     Villagers.bindCouple(house)
     Villagers.choose(house)
+    State.waves.phase = "wave"
+    State.waves.clock = 12.5
+    State.waves.ti = 3
+    Enemies.n = 0
+    local kinds = { "grunt", "spitter", "brute" }
+    for k = 1, 3 do
+      Enemies.spawn(v.x + 220 + k * 20, v.y - 40 + k * 8, kinds[k], 1)
+    end
+    Projectiles.n = 0
+    EnemyShots.n = 0
+    Projectiles.spawn(v.x + 40, v.y - 20, v.x + 120, v.y - 20, 160, 3)
+    EnemyShots.spawn(v.x - 40, v.y + 20, v.x - 120, v.y + 20, 120, 2)
+    Villagers.mobilized = true
+    local mobV = Villagers.list[1]
+    if mobV then
+      mobV.mob = { job = "wood", state = "toNode", building = nil, altar = nil, buildTarget = 0 }
+    end
     State._saveBefore = {
       buildings = Buildings.n, wood = State.stock.wood, couples = #Villagers.couples,
       year = State.waves.calendar.year, month = State.waves.calendar.month,
       villagers = #Villagers.list, nodes = #Nodes.list,
+      bone = State.stock.bone, tower = tower, grave = grave,
+      crewCount = Buildings.crewCount[tower], graveCount = 7,
+      phase = State.waves.phase, clock = State.waves.clock, ti = State.waves.ti,
+      enemies = Enemies.n, projectiles = Projectiles.n, shots = EnemyShots.n,
+      enemyKind = Enemies.n > 0 and Enemies.KINDS[Enemies.kind[1]] or "",
+      mobilized = Villagers.mobilized, mobId = mobV and mobV.id or nil,
     }
     local b = State._saveBefore
     local ok = Persistence.save(State, true)
-    State.stock.wood, State.stock.food = 0, 0
+    State.stock.wood, State.stock.food, State.stock.bone = 0, 0, 0
     Buildings.clear()
     Walls.clear()
     Villagers.clear()
+    Enemies.n, Projectiles.n, EnemyShots.n = 0, 0, 0
     Nodes.list = {}
-    print(("[save] wrote=%s before: b=%d wood=%d couples=%d y=%d m=%d villagers=%d nodes=%d")
-      :format(tostring(ok), b.buildings, b.wood, b.couples, b.year, b.month, b.villagers, b.nodes))
+    print(("[save] wrote=%s before: b=%d wood=%d bone=%d couples=%d y=%d m=%d villagers=%d nodes=%d phase=%s clock=%.1f ti=%d actors=%d/%d/%d")
+      :format(tostring(ok), b.buildings, b.wood, b.bone, b.couples, b.year, b.month, b.villagers,
+        b.nodes, b.phase, b.clock, b.ti, b.enemies, b.projectiles, b.shots))
     State.saveAction = nil
   elseif State.saveAction == nil and not State._saveDone then
     State._saveDone = true
@@ -482,12 +527,35 @@ local function saveUpdate()
       buildings = Buildings.n, wood = State.stock.wood, couples = #Villagers.couples,
       year = State.waves.calendar.year, month = State.waves.calendar.month,
       villagers = #Villagers.list, nodes = #Nodes.list,
+      bone = State.stock.bone,
+      phase = State.waves.phase, clock = State.waves.clock, ti = State.waves.ti,
+      enemies = Enemies.n, projectiles = Projectiles.n, shots = EnemyShots.n,
+      enemyKind = Enemies.n > 0 and Enemies.KINDS[Enemies.kind[1]] or "",
+      mobilized = Villagers.mobilized,
     }
     local b = State._saveBefore
+    local crewOk = Buildings.maxCrew[b.tower] == (buildingData.arrow_tower.crew or 0)
+      and Buildings.crewCount[b.tower] == b.crewCount
+    local graveOk = Buildings.graves[b.grave] == b.graveCount
+    local researchOk = Research.has("sharp_bolts") and Stats.value("towerDamage") > 1.0
+    local actorsOk = a.enemies == b.enemies and a.projectiles == b.projectiles and a.shots == b.shots
+      and a.enemyKind == b.enemyKind
+    local waveOk = a.phase == b.phase and math.abs(a.clock - b.clock) < 1e-6 and a.ti == b.ti
+      and a.mobilized == b.mobilized
+    local mobOk = false
+    for _, vv in ipairs(Villagers.list) do
+      if vv.id == b.mobId then
+        mobOk = vv.mob ~= nil and vv.mob.job == "wood" and vv.mob.state == "toNode"
+      end
+    end
     local match = ok and a.buildings == b.buildings and a.wood == b.wood and a.couples == b.couples
       and a.year == b.year and a.month == b.month and a.villagers == b.villagers and a.nodes == b.nodes
-    print(("[save] loaded=%s after: b=%d wood=%d couples=%d y=%d m=%d villagers=%d nodes=%d match=%s")
-      :format(tostring(ok), a.buildings, a.wood, a.couples, a.year, a.month, a.villagers, a.nodes, tostring(match)))
+      and a.bone == b.bone and crewOk and graveOk and researchOk and actorsOk and waveOk and mobOk
+    print(("[save] loaded=%s after: b=%d wood=%d bone=%d couples=%d y=%d m=%d villagers=%d nodes=%d phase=%s clock=%.1f ti=%d actors=%d/%d/%d crew=%s grave=%s research=%s actorsOk=%s waveOk=%s mobOk=%s match=%s")
+      :format(tostring(ok), a.buildings, a.wood, a.bone, a.couples, a.year, a.month, a.villagers,
+        a.nodes, a.phase, a.clock, a.ti, a.enemies, a.projectiles, a.shots,
+        tostring(crewOk), tostring(graveOk), tostring(researchOk),
+        tostring(actorsOk), tostring(waveOk), tostring(mobOk), tostring(match)))
     love.event.quit()
     State.save = nil
   end
@@ -691,6 +759,9 @@ local function warUpdate()
     local tower = Buildings.place(tx, ty, "arrow_tower", true)
     local hx, hy = Grid.worldToTile(v.x - 4 * Grid.TILE, v.y)
     local house = Buildings.place(hx, hy, "house", true)
+    -- Extra housing so the starting population is below the birth cap.
+    local ex, ey = Grid.worldToTile(v.x - 4 * Grid.TILE, v.y + 4 * Grid.TILE)
+    Buildings.place(ex, ey, "house", true)
     Villagers.bindCouple(house)
     -- 1) mobilize: fill empty tower slots + shelter surplus, then restore
     local before = Buildings.crewCount[tower] or 0
@@ -772,6 +843,151 @@ local function assignUpdate()
     tostring(r.node), tostring(r.tower), tostring(r.school), tostring(r.build)))
   love.event.quit()
   State.assign = nil
+end
+
+local function pathUpdate()
+  if State.pathAction and State.path == State.pathAction then
+    local v = State.village
+    v.hp, v.maxHp = 1e9, 1e9
+    local test
+    for _, vv in ipairs(Villagers.list) do
+      if not vv.dead and not vv.undead and vv.age ~= "child" then test = vv break end
+    end
+    if not test then
+      print("[path] FAIL: no villager")
+      love.event.quit()
+      State.path = nil
+      return
+    end
+    Villagers.setJob(test, "idle")
+    local wx = v.x + 4 * Grid.TILE
+    local bgx, bgy = Grid.worldToTile(wx, v.y)
+    for dy = -2, 2 do
+      local gx, gy = bgx, bgy + dy
+      if Walls.canPlace(gx, gy) then
+        Walls.place(gx, gy)
+        State.pathWallCount = State.pathWallCount + 1
+      end
+    end
+    local node = Nodes.add({ kind = "tree", res = "wood", amount = 999, regen = 0, r = 12 },
+      v.x + 10 * Grid.TILE, v.y)
+    Villagers.assignNode(test, node)
+    State.pathVillager = test
+    State.pathNode = node
+    State.pathAction = nil
+    print(("[path] setup walls=%d nodeX=%.0f"):format(State.pathWallCount, node.x))
+  end
+  local vv = State.pathVillager
+  if vv and not vv.dead then
+    local gx, gy = Grid.worldToTile(vv.x, vv.y)
+    if Grid.isSolidTile(gx, gy) then State.pathSolid = true end
+    local nd = State.pathNode
+    if nd then
+      local dx, dy = vv.x - nd.x, vv.y - nd.y
+      if dx * dx + dy * dy <= (nd.r + vv.r + 6) * (nd.r + vv.r + 6) then
+        State.pathReached = true
+      end
+    end
+  end
+  if State.path <= 0 then
+    print(("[path] reached=%s solid=%s walls=%d job=%s")
+      :format(tostring(State.pathReached), tostring(State.pathSolid),
+        State.pathWallCount, vv and vv.job or "none"))
+    love.event.quit()
+    State.path = nil
+  end
+end
+
+local function spitUpdate()
+  if State.spitAction and State.spit == State.spitAction then
+    local v = State.village
+    v.hp, v.maxHp = 1e9, 1e9
+    Enemies.n = 0
+    Projectiles.n = 0
+    EnemyShots.n = 0
+    local test
+    for _, vv in ipairs(Villagers.list) do
+      if not test and not vv.dead and not vv.undead and vv.age ~= "child" then
+        test = vv
+      else
+        vv.dead = true
+        vv.hp = 0
+      end
+    end
+    if not test then
+      print("[spit] FAIL: no villager")
+      love.event.quit()
+      State.spit = nil
+      return
+    end
+    test.dead, test.hp, test.maxHp = false, 1e6, 1e6
+    local gx, gy = Grid.worldToTile(v.x + 5 * Grid.TILE, v.y)
+    local house = 0
+    if Buildings.canPlace(gx, gy, v) then house = Buildings.place(gx, gy, "house", false) end
+    if house > 0 then Villagers.assignBuild(test, house) end
+    local e = Enemies.spawn(v.x + 4 * Grid.TILE, v.y, "spitter", 1)
+    Enemies.speed[e] = 0
+    State.spitTest = test
+    State.spitEnemy = e
+    State.spitHp = test.hp
+    State.spitAction = nil
+    print("[spit] setup")
+  end
+  local test = State.spitTest
+  if test then
+    local e = State.spitEnemy
+    if e and e <= Enemies.n then Enemies.speed[e] = 0 end
+    if test.hp < State.spitHp then
+      State.spitOk = true
+      print(("[spit] hit=true damage=%.1f shotsAlive=%d hits=%d")
+        :format(State.spitHp - test.hp, EnemyShots.n, EnemyShots.hits))
+      love.event.quit()
+      State.spit = nil
+      return
+    end
+  end
+  if State.spit <= 0 then
+    print(("[spit] hit=%s damage=%.1f shotsAlive=%d hits=%d")
+      :format(tostring(State.spitOk), State.spitHp - (test and test.hp or State.spitHp),
+        EnemyShots.n, EnemyShots.hits))
+    love.event.quit()
+    State.spit = nil
+  end
+end
+
+local function pairUpdate()
+  if not (State.pairAction and State.pair == State.pairAction) then return end
+  local v = State.village
+  v.hp, v.maxHp = 1e9, 1e9
+  local men, women = {}, {}
+  for _, vv in ipairs(Villagers.list) do
+    if not vv.dead and not vv.undead and vv.age ~= "child" then
+      if vv.sex == "m" then men[#men + 1] = vv else women[#women + 1] = vv end
+    end
+  end
+  local function tile(dx, dy) return Grid.worldToTile(v.x + dx * Grid.TILE, v.y + dy * Grid.TILE) end
+  local hx, hy = tile(4, 0)
+  local houseA = Buildings.place(hx, hy, "house", true)
+  local bx, by = tile(-4, 0)
+  local houseB = Buildings.place(bx, by, "house", true)
+  local ax, ay = tile(0, 4)
+  local altar = Buildings.place(ax, ay, "altar", true)
+  local okSame = Villagers.bindCoupleTo(houseB, men[2], men[3])
+  local okFertile = Villagers.bindCoupleTo(houseA, men[1], women[1])
+  local cSame = Villagers.coupleAt(houseB)
+  local buff = cSame and Villagers.workMul(men[2]) or 0
+  local noChild = not Villagers.makeChild(houseB, State)
+  local noVessel = not Villagers.choose(houseB)
+  local child = Villagers.makeChild(houseA, State)
+  local vessel = Villagers.choose(houseA)
+  local canConceive = Villagers.canConceive()
+  local unbindSame = Villagers.unbind(houseB)
+  print(("[pair] fertile=%s same=%s buff=%.2f noChild=%s noVessel=%s child=%s vessel=%s canConceive=%s unbindSame=%s buffAfter=%.2f altar=%d")
+    :format(tostring(okFertile), tostring(okSame), buff, tostring(noChild), tostring(noVessel),
+      tostring(child), tostring(vessel), tostring(canConceive), tostring(unbindSame),
+      Villagers.workMul(men[2]), altar))
+  love.event.quit()
+  State.pair = nil
 end
 
 function State.update(dt)
@@ -867,6 +1083,21 @@ function State.update(dt)
     assignUpdate()
     if not State.assign then return end
   end
+  if State.path then
+    State.path = State.path - 1
+    pathUpdate()
+    if not State.path then return end
+  end
+  if State.spit then
+    State.spit = State.spit - 1
+    spitUpdate()
+    if not State.spit then return end
+  end
+  if State.pair then
+    State.pair = State.pair - 1
+    pairUpdate()
+    if not State.pair then return end
+  end
   if State.mode ~= "playing" then return end
   local stepT0 = love.timer.getTime()
   State.hash:rebuild(Enemies)
@@ -890,6 +1121,11 @@ function State.update(dt)
     elseif sel.building and sel.building > Buildings.n then
       State.selection = nil
     end
+  end
+  local pp = State.pairPick
+  if pp then
+    if pp.a and (pp.a.dead or pp.a.coupleId) then pp.a = nil end
+    if pp.b and (pp.b.dead or pp.b.coupleId) then pp.b = nil end
   end
   Particles.update(dt)
   if State.flash > 0 then State.flash = math.max(0, State.flash - dt * 1.6) end

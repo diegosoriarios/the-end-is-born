@@ -77,6 +77,22 @@ local function update(dt, hash)
   end
 end
 
+function Projectiles.load(list, hits)
+  local P = Projectiles
+  P.n = 0
+  P.hits = hits or 0
+  for i = 1, #(list or {}) do
+    local r = list[i]
+    P.n = P.n + 1
+    P.x[i] = r.x
+    P.y[i] = r.y
+    P.vx[i] = r.vx
+    P.vy[i] = r.vy
+    P.damage[i] = r.damage
+    P.life[i] = r.life
+  end
+end
+
 Projectiles.spawn = spawn
 Projectiles.update = update
 

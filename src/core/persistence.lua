@@ -6,6 +6,9 @@ local Camera = require("src.core.camera")
 local Buildings = require("src.sim.buildings")
 local Walls = require("src.sim.walls")
 local Villagers = require("src.sim.villagers")
+local Enemies = require("src.sim.enemies")
+local Projectiles = require("src.sim.projectiles")
+local EnemyShots = require("src.sim.enemyShots")
 local Nodes = require("src.sim.nodes")
 local Checklist = require("src.sim.checklist")
 local Ages = require("src.sim.ages")
@@ -14,7 +17,7 @@ local Flow = require("src.sim.flowfield")
 
 local Persistence = {}
 
-local VERSION = 1
+local VERSION = 2
 
 function Persistence.exists()
   return Save.exists()
@@ -22,7 +25,7 @@ end
 
 function Persistence.canSave(S, force)
   if force then return S.mode == "playing" end
-  return S.mode == "playing" and S.waves.phase == "village" and not S.harness
+  return S.mode == "playing" and not S.harness
 end
 
 function Persistence.snapshot(S)
@@ -32,7 +35,7 @@ function Persistence.snapshot(S)
     year = cal.year, month = cal.month, t = cal.t,
     epoch = cal.epoch, apocalypse = cal.apocalypse, hordeDue = cal.hordeDue,
   }
-  snap.stock = { wood = S.stock.wood, food = S.stock.food, stone = S.stock.stone }
+  snap.stock = { wood = S.stock.wood, food = S.stock.food, stone = S.stock.stone, bone = S.stock.bone or 0 }
   snap.village = { hp = S.village.hp, maxHp = S.village.maxHp }
   snap.camera = { x = Camera.x, y = Camera.y, zoom = Camera.zoom }
 
@@ -41,7 +44,8 @@ function Persistence.snapshot(S)
     bl[i] = {
       kind = Buildings.kind[i], gx = Buildings.gx[i], gy = Buildings.gy[i],
       hp = Buildings.hp[i], maxHp = Buildings.maxHp[i], progress = Buildings.progress[i],
-      built = Buildings.built[i], crewCount = Buildings.crewCount[i], cd = Buildings.cd[i],
+      built = Buildings.built[i], crewCount = Buildings.crewCount[i], maxCrew = Buildings.maxCrew[i] or 0,
+      graves = Buildings.graves[i] or 0, cd = Buildings.cd[i],
       project = Buildings.project[i], rprogress = Buildings.rprogress[i],
     }
   end
@@ -71,6 +75,7 @@ function Persistence.snapshot(S)
       job = v.job, state = v.state, carry = v.carry, carryRes = v.carryRes,
       nodeIndex = v.node and nodeIndex[v.node] or nil,
       buildTarget = v.buildTarget, building = v.building, altar = v.altar,
+      ritual = v.ritual, mob = v.mob,
       timer = v.timer, wx = v.wx, wy = v.wy, age = v.age, growLeft = v.growLeft,
       undead = v.undead, confined = v.confined,
     }
@@ -82,7 +87,7 @@ function Persistence.snapshot(S)
     local c = Villagers.couples[i]
     cl[i] = {
       id = c.id, house = c.house,
-      manId = c.man and c.man.id or nil, womanId = c.woman and c.woman.id or nil,
+      aId = c.a and c.a.id or nil, bId = c.b and c.b.id or nil, fertile = c.fertile,
       pregnant = c.pregnant, monthsLeft = c.monthsLeft, askIn = c.askIn, pending = c.pending,
       chosen = c.chosen, conceived = c.conceived, conceiving = c.conceiving, altar = c.altar,
     }
@@ -92,6 +97,38 @@ function Persistence.snapshot(S)
   snap.deaths = Villagers.deaths
   snap.conceived = Villagers.conceived
   snap.seenEpoch = Villagers.seenEpoch
+  snap.mobilized = Villagers.mobilized
+  snap.vesselId = Villagers.vesselId
+
+  local el = {}
+  for i = 1, Enemies.n do
+    el[i] = {
+      kind = Enemies.KINDS[Enemies.kind[i]],
+      x = Enemies.x[i], y = Enemies.y[i], hx = Enemies.hx[i], hy = Enemies.hy[i],
+      hp = Enemies.hp[i], maxHp = Enemies.maxHp[i],
+      attackTimer = Enemies.attackTimer[i], blk = Enemies.blk[i],
+    }
+  end
+  snap.enemies = el
+  local pl = {}
+  for i = 1, Projectiles.n do
+    pl[i] = {
+      x = Projectiles.x[i], y = Projectiles.y[i], vx = Projectiles.vx[i], vy = Projectiles.vy[i],
+      damage = Projectiles.damage[i], life = Projectiles.life[i],
+    }
+  end
+  snap.projectiles = pl
+  local sl = {}
+  for i = 1, EnemyShots.n do
+    sl[i] = {
+      x = EnemyShots.x[i], y = EnemyShots.y[i], vx = EnemyShots.vx[i], vy = EnemyShots.vy[i],
+      damage = EnemyShots.damage[i], life = EnemyShots.life[i],
+    }
+  end
+  snap.enemyShots = sl
+  snap.kills = Enemies.kills
+  snap.projectileHits = Projectiles.hits
+  snap.shotHits = EnemyShots.hits
 
   snap.checklist = {
     ids = Checklist.doneIds(),
@@ -121,7 +158,7 @@ function Persistence.save(S, force)
 end
 
 function Persistence.restore(S, snap)
-  if not snap or snap.version ~= VERSION then return false end
+  if not snap or not snap.version or snap.version < 1 or snap.version > VERSION then return false end
   S.reset()
   local cal = S.waves.calendar
   cal.year = snap.calendar.year
@@ -133,6 +170,7 @@ function Persistence.restore(S, snap)
   S.stock.wood = snap.stock.wood
   S.stock.food = snap.stock.food
   S.stock.stone = snap.stock.stone
+  S.stock.bone = snap.stock.bone or 0
   S.village.hp = snap.village.hp
   S.village.maxHp = snap.village.maxHp
   Camera.x, Camera.y, Camera.zoom = snap.camera.x, snap.camera.y, snap.camera.zoom
@@ -143,7 +181,11 @@ function Persistence.restore(S, snap)
   Checklist.load(snap.checklist.ids, snap.checklist.sacrifices, snap.checklist.burns)
   Ages.load(snap.age)
   Research.load(snap.research)
-  Villagers.load(snap.villagers, snap.couples, snap.requestId, snap.deaths, snap.conceived, snap.seenEpoch)
+  Enemies.load(snap.enemies, snap.kills)
+  Projectiles.load(snap.projectiles, snap.projectileHits)
+  EnemyShots.load(snap.enemyShots, snap.shotHits)
+  Villagers.load(snap.villagers, snap.couples, snap.requestId, snap.deaths, snap.conceived,
+    snap.seenEpoch, snap.mobilized, snap.vesselId)
   local w = S.waves
   w.phase = snap.waves.phase
   w.number = snap.waves.number

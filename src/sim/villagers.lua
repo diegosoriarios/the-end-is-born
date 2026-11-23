@@ -2,6 +2,7 @@ local vData = require("src.data.villagers")
 local resData = require("src.data.resources")
 local buildingData = require("src.data.buildings")
 local Grid = require("src.sim.grid")
+local Path = require("src.sim.path")
 local Nodes = require("src.sim.nodes")
 local Buildings = require("src.sim.buildings")
 local Particles = require("src.fx.particles")
@@ -12,7 +13,7 @@ local Stats = require("src.sim.stats")
 local Villagers = {
   list = {}, deaths = 0, onSacrificed = nil, onNotice = nil, onHeartSacrifice = nil, onDeath = nil,
   couples = {}, request = nil, conceived = false, failReason = nil, seenEpoch = 0,
-  mobilized = false,
+  mobilized = false, vesselId = nil,
 }
 local nextId = 1
 local nextCouple = 1
@@ -88,6 +89,7 @@ function Villagers.clear()
   Villagers.failReason = nil
   Villagers.seenEpoch = 0
   Villagers.mobilized = false
+  Villagers.vesselId = nil
   nextId = 1
   nextCouple = 1
 end
@@ -113,6 +115,7 @@ function Villagers.spawn(x, y, sex, family)
     undead = false,
     confined = false,
     mob = nil,
+    path = nil, pathI = 0, pathDone = false, pathVersion = nil, blockedTime = 0,
     age = "adult",
     growLeft = 0,
     coupleId = nil,
@@ -167,18 +170,151 @@ function Villagers.spawnUndead(x, y)
   return v
 end
 
+local REPATH_DIST2 = 24 * 24
+local BLOCKED_REPATH = 0.35
+local WAYPOINT_DIST = 6
+local REPATH_BUDGET = 8
+local repathBudget = 0
+local PATH_W = Grid.WIDTH
+
+local function pathWorld(idx)
+  local gx = (idx - 1) % PATH_W
+  local gy = math.floor((idx - 1) / PATH_W)
+  return Grid.tileToWorld(gx, gy)
+end
+
+-- Solid tiles block movement, except that a servant already stuck inside one
+-- is allowed to walk out (buildings can be placed on top of them).
+local function blockedTileFor(v, x, y)
+  local gx, gy = Grid.worldToTile(x, y)
+  if not Grid.isSolidTile(gx, gy) then return false end
+  local cgx, cgy = Grid.worldToTile(v.x, v.y)
+  return not Grid.isSolidTile(cgx, cgy)
+end
+
+local function requestPath(v, tx, ty)
+  if repathBudget <= 0 then return false end
+  repathBudget = repathBudget - 1
+  local sgx, sgy = Grid.worldToTile(v.x, v.y)
+  local ggx, ggy = Grid.worldToTile(tx, ty)
+  if Grid.isSolidTile(ggx, ggy) then
+    local nx, ny = Grid.nearestFree(ggx, ggy)
+    if not nx then
+      v.path, v.pathI, v.pathDone = nil, 0, true
+      v.pathVersion = Grid.version
+      v.pathGoalX, v.pathGoalY = tx, ty
+      return false
+    end
+    ggx, ggy = nx, ny
+  end
+  v.path = Path.find(sgx, sgy, ggx, ggy)
+  v.pathI = 1
+  v.pathDone = false
+  v.pathVersion = Grid.version
+  v.pathGoalX, v.pathGoalY = tx, ty
+  return v.path ~= nil
+end
+
+-- Cheap crowd separation: nudge away from nearby servants so they spread out
+-- around nodes and doorways instead of stacking on one pixel.
+local function separation(v)
+  local sx, sy = 0, 0
+  local list = Villagers.list
+  for i = 1, #list do
+    local o = list[i]
+    if o ~= v and not o.dead then
+      local dx, dy = v.x - o.x, v.y - o.y
+      local rr = v.r + o.r + 3
+      local d2 = dx * dx + dy * dy
+      if d2 > 0.0001 and d2 < rr * rr then
+        local d = math.sqrt(d2)
+        local push = (rr - d) / rr
+        sx = sx + dx / d * push
+        sy = sy + dy / d * push
+      end
+    end
+  end
+  return sx, sy
+end
+
 local function move(v, tx, ty, dt, arriveDist)
   local dx, dy = tx - v.x, ty - v.y
   local d2 = dx * dx + dy * dy
-  if d2 <= arriveDist * arriveDist then return true end
-  local d = math.sqrt(d2)
-  local step = vData.speed * dt
-  if d <= step then
-    v.x, v.y = tx, ty
+  if d2 <= arriveDist * arriveDist then
+    v.path, v.pathI, v.pathDone, v.blockedTime = nil, 0, false, 0
     return true
   end
-  v.x = v.x + dx / d * step
-  v.y = v.y + dy / d * step
+
+  local goalMoved = not v.pathGoalX
+    or (tx - v.pathGoalX) * (tx - v.pathGoalX) + (ty - v.pathGoalY) * (ty - v.pathGoalY) > REPATH_DIST2
+  local stale = v.pathVersion ~= Grid.version
+  if stale or goalMoved then
+    v.path, v.pathDone = nil, false
+  end
+  if (v.path == nil and not v.pathDone) or goalMoved or stale then
+    requestPath(v, tx, ty)
+  elseif v.blockedTime and v.blockedTime > BLOCKED_REPATH then
+    v.pathDone = false
+    requestPath(v, tx, ty)
+    v.blockedTime = 0
+  end
+
+  local mx, my = 0, 0
+  if v.path and v.pathI <= #v.path then
+    local guard = 0
+    while v.pathI <= #v.path and guard < 8 do
+      guard = guard + 1
+      local wx, wy = pathWorld(v.path[v.pathI])
+      local wdx, wdy = wx - v.x, wy - v.y
+      if wdx * wdx + wdy * wdy <= WAYPOINT_DIST * WAYPOINT_DIST then
+        v.pathI = v.pathI + 1
+      else
+        mx, my = wdx, wdy
+        break
+      end
+    end
+    if v.pathI > #v.path then
+      v.path, v.pathDone = nil, true
+    end
+  end
+  if mx == 0 and my == 0 then
+    mx, my = dx, dy
+  end
+  local ml = math.sqrt(mx * mx + my * my)
+  if ml < 0.0001 then
+    mx, my, ml = 1, 0, 1
+  end
+
+  local sx, sy = separation(v)
+  mx = mx / ml + sx * 0.8
+  my = my / ml + sy * 0.8
+  local nl = math.sqrt(mx * mx + my * my)
+  if nl < 0.0001 then return false end
+  mx, my = mx / nl, my / nl
+
+  local step = vData.speed * dt
+  if d2 <= step * step and not blockedTileFor(v, tx, ty) then
+    v.x, v.y = tx, ty
+    v.path, v.pathI, v.pathDone, v.blockedTime = nil, 0, false, 0
+    return true
+  end
+
+  local moved = false
+  local nx = v.x + mx * step
+  if not blockedTileFor(v, nx, v.y) then
+    v.x = nx
+    moved = true
+  end
+  local ny = v.y + my * step
+  if not blockedTileFor(v, v.x, ny) then
+    v.y = ny
+    moved = true
+  end
+  if moved then
+    v.blockedTime = 0
+  else
+    v.blockedTime = (v.blockedTime or 0) + dt
+  end
   return false
 end
 
@@ -241,7 +377,8 @@ local function updateGather(v, dt, ctx, res)
   if v.state == "toNode" then
     if move(v, node.x, node.y, dt, node.r + v.r + 4) then
       v.state = "gathering"
-      v.timer = Stats.value("gatherSpeed") > 0 and (resData.gatherInterval / Stats.value("gatherSpeed")) or resData.gatherInterval
+      local rate = Stats.value("gatherSpeed") * Villagers.workMul(v)
+      v.timer = rate > 0 and (resData.gatherInterval / rate) or resData.gatherInterval
     end
   elseif v.state == "gathering" then
     v.timer = v.timer - dt
@@ -253,7 +390,8 @@ local function updateGather(v, dt, ctx, res)
         if v.carry >= cap then
           v.state = "toDepot"
         else
-          v.timer = Stats.value("gatherSpeed") > 0 and (resData.gatherInterval / Stats.value("gatherSpeed")) or resData.gatherInterval
+          local rate = Stats.value("gatherSpeed") * Villagers.workMul(v)
+          v.timer = rate > 0 and (resData.gatherInterval / rate) or resData.gatherInterval
         end
       else
         v.node = nil
@@ -394,7 +532,8 @@ local function updateVillager(v, dt, ctx)
     local b = v.buildTarget
     if move(v, Buildings.x[b], Buildings.y[b], dt, Grid.TILE * 0.9) then
       local d = buildingData[Buildings.kind[b]]
-      Buildings.progress[b] = Buildings.progress[b] + vData.buildRate * Stats.value("buildSpeed") * dt
+      Buildings.progress[b] = Buildings.progress[b]
+        + vData.buildRate * Stats.value("buildSpeed") * Villagers.workMul(v) * dt
       if Buildings.progress[b] >= d.buildTime then
         Buildings.built[b] = true
         Buildings.progress[b] = d.buildTime
@@ -416,6 +555,7 @@ local function updateVillager(v, dt, ctx)
 end
 
 function Villagers.update(dt, ctx)
+  repathBudget = REPATH_BUDGET
   local list = Villagers.list
   for i = 1, #list do
     updateVillager(list[i], dt, ctx)
@@ -738,12 +878,13 @@ function Villagers.onBuildingRemoved(destroyed, movedFrom, movedTo)
   for i = #Villagers.couples, 1, -1 do
     local c = Villagers.couples[i]
     if c.house == destroyed then
-      for _, p in ipairs({ c.man, c.woman }) do
+      for _, p in ipairs({ c.a, c.b }) do
         if p then
           p.coupleId = nil
           if p.confined then p.confined = false p.job, p.state = "idle", "idle" end
         end
       end
+      if Villagers.vesselId == c.id then Villagers.vesselId = nil end
       if Villagers.request == c then Villagers.request = nil end
       table.remove(Villagers.couples, i)
     end
@@ -784,11 +925,57 @@ function Villagers.coupleAt(house)
   return nil
 end
 
+function Villagers.coupleById(id)
+  if not id then return nil end
+  for i = 1, #Villagers.couples do
+    if Villagers.couples[i].id == id then return Villagers.couples[i] end
+  end
+  return nil
+end
+
+function Villagers.coupleOf(v)
+  return v and Villagers.coupleById(v.coupleId) or nil
+end
+
+-- Which partner carries a pregnancy (opposite-sex unions only).
+function Villagers.coupleMother(c)
+  if not c then return nil end
+  if c.a and c.a.sex == "f" then return c.a end
+  if c.b and c.b.sex == "f" then return c.b end
+  return c.a or c.b
+end
+
+function Villagers.coupleFather(c)
+  if not c then return nil end
+  if c.a and c.a.sex == "m" then return c.a end
+  if c.b and c.b.sex == "m" then return c.b end
+  return c.a or c.b
+end
+
+-- Same-sex households cannot conceive, but both partners work harder.
+function Villagers.workMul(v)
+  local c = Villagers.coupleOf(v)
+  if c and not c.fertile then return vData.unionWorkMul or 1.15 end
+  return 1
+end
+
+function Villagers.researchRateAt(b)
+  local rate = 0
+  local list = Villagers.list
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead and v.job == "research" and v.building == b then
+      rate = rate + Villagers.workMul(v)
+    end
+  end
+  return rate
+end
+
 function Villagers.coupleCount()
   local n = 0
   for i = 1, #Villagers.couples do
     local c = Villagers.couples[i]
-    if personAlive(c.man) and personAlive(c.woman) then n = n + 1 end
+    if personAlive(c.a) and personAlive(c.b) then n = n + 1 end
   end
   return n
 end
@@ -802,31 +989,66 @@ function Villagers.freeAdult(sex)
   return nil
 end
 
-function Villagers.bindCouple(house)
+function Villagers.canBindPair(a, b)
+  if not a or not b or a == b then return false end
+  if a.dead or b.dead or a.undead or b.undead then return false end
+  if a.age == "child" or b.age == "child" then return false end
+  if a.coupleId or b.coupleId then return false end
+  return true
+end
+
+function Villagers.bindCoupleTo(house, a, b)
   if Villagers.coupleAt(house) then return false end
   if not (house and house <= Buildings.n and Buildings.kind[house] == "house") then return false end
-  local man = Villagers.freeAdult("m")
-  local woman = Villagers.freeAdult("f")
-  if not man or not woman then return false end
+  if not Villagers.canBindPair(a, b) then return false end
   local c = {
-    id = nextCouple, house = house, man = man, woman = woman,
+    id = nextCouple, house = house, a = a, b = b,
+    fertile = a.sex ~= b.sex,
     pregnant = false, monthsLeft = 0, askIn = vData.askEvery,
     pending = false, chosen = false, conceived = false, conceiving = false, altar = nil,
   }
   nextCouple = nextCouple + 1
-  man.coupleId = c.id
-  woman.coupleId = c.id
+  a.coupleId = c.id
+  b.coupleId = c.id
   Villagers.couples[#Villagers.couples + 1] = c
-  if Villagers.onNotice then Villagers.onNotice("A union is blessed", "the flock grows in the dark") end
+  if Villagers.onNotice then
+    if c.fertile then
+      Villagers.onNotice("A union is blessed", "the flock grows in the dark")
+    else
+      Villagers.onNotice("A household is bonded", "they toil together, twice devoted")
+    end
+  end
   return true
+end
+
+-- Auto-pick for harnesses and scripted setup; players bind picks manually.
+function Villagers.bindCouple(house)
+  local pool = {}
+  local list = Villagers.list
+  for i = 1, #list do
+    local v = list[i]
+    if not v.dead and not v.undead and v.age ~= "child" and not v.coupleId then
+      pool[#pool + 1] = v
+    end
+  end
+  local man, woman
+  for i = 1, #pool do
+    if not man and pool[i].sex == "m" then man = pool[i] end
+    if not woman and pool[i].sex == "f" then woman = pool[i] end
+  end
+  if man and woman then return Villagers.bindCoupleTo(house, man, woman) end
+  if #pool >= 2 then return Villagers.bindCoupleTo(house, pool[1], pool[2]) end
+  return false
 end
 
 function Villagers.unbind(house)
   local c = Villagers.coupleAt(house)
   if not c then return false end
   if c.conceived or c.conceiving or (c.chosen and c.pregnant) then return false end
-  if c.man then c.man.coupleId = nil end
-  if c.woman then c.woman.coupleId = nil end
+  if c.a then c.a.coupleId = nil end
+  if c.b then c.b.coupleId = nil end
+  if c.chosen then c.chosen = false end
+  if Villagers.vesselId == c.id then Villagers.vesselId = nil end
   if Villagers.request == c then Villagers.request = nil end
   for i = 1, #Villagers.couples do
     if Villagers.couples[i] == c then table.remove(Villagers.couples, i) break end
@@ -836,10 +1058,11 @@ end
 
 function Villagers.choose(house)
   local c = Villagers.coupleAt(house)
-  if not c then return false end
+  if not c or not c.fertile then return false end
   if c.conceived or c.conceiving then return false end
   for i = 1, #Villagers.couples do Villagers.couples[i].chosen = false end
   c.chosen = true
+  Villagers.vesselId = c.id
   if Villagers.onNotice then Villagers.onNotice("The vessel is chosen", "conceive the Antichrist at the Altar") end
   return true
 end
@@ -849,28 +1072,38 @@ function Villagers.unchoose(house)
   if not c then return false end
   if c.conceived or c.conceiving then return false end
   c.chosen = false
+  if Villagers.vesselId == c.id then Villagers.vesselId = nil end
   if Villagers.onNotice then Villagers.onNotice("The vessel is released", nil) end
   return true
 end
 
 function Villagers.chosenCouple()
+  if Villagers.vesselId then
+    local c = Villagers.coupleById(Villagers.vesselId)
+    if c then return c end
+    Villagers.vesselId = nil
+  end
   for i = 1, #Villagers.couples do
-    if Villagers.couples[i].chosen then return Villagers.couples[i] end
+    local c = Villagers.couples[i]
+    if c.chosen then
+      Villagers.vesselId = c.id
+      return c
+    end
   end
   return nil
 end
 
 function Villagers.canConceive()
   local c = Villagers.chosenCouple()
-  return c ~= nil and not c.conceived and not c.conceiving
-    and personAlive(c.man) and personAlive(c.woman)
+  return c ~= nil and c.fertile and not c.conceived and not c.conceiving
+    and personAlive(c.a) and personAlive(c.b)
 end
 
 -- The Altar ritual: both partners walk to the altar, then the end times begin.
 function Villagers.startConception(b)
   local c = Villagers.chosenCouple()
-  if not c or c.conceived or c.conceiving then return false end
-  if not personAlive(c.man) or not personAlive(c.woman) then return false end
+  if not c or not c.fertile or c.conceived or c.conceiving then return false end
+  if not personAlive(c.a) or not personAlive(c.b) then return false end
   local function walk(v)
     unassignBuilding(v)
     v.job, v.state = "conceive", "walking"
@@ -878,8 +1111,8 @@ function Villagers.startConception(b)
     v.node = nil
     v.buildTarget = 0
   end
-  walk(c.man)
-  walk(c.woman)
+  walk(c.a)
+  walk(c.b)
   c.conceiving = true
   c.altar = b
   return true
@@ -889,8 +1122,8 @@ end
 -- food (Age-of-Empires style).
 function Villagers.makeChild(house, S)
   local c = Villagers.coupleAt(house)
-  if not c or c.pregnant or c.conceived or c.conceiving then return false end
-  if not personAlive(c.man) or not personAlive(c.woman) then return false end
+  if not c or not c.fertile or c.pregnant or c.conceived or c.conceiving then return false end
+  if not personAlive(c.a) or not personAlive(c.b) then return false end
   local cap = (S and S.buildings and S.buildings.popCap()) or 0
   if Villagers.population() >= cap then return false end
   local cost = vData.birthCost or 0
@@ -898,7 +1131,8 @@ function Villagers.makeChild(house, S)
   if S then S.stock.food = S.stock.food - cost end
   c.pregnant = true
   c.monthsLeft = vData.pregnancyMonths
-  if c.woman then c.woman.confined = false end
+  local mother = Villagers.coupleMother(c)
+  if mother then mother.confined = false end
   if Villagers.onNotice then Villagers.onNotice("A child is conceived", cost > 0 and (cost .. " food offered") or nil) end
   return true
 end
@@ -907,8 +1141,8 @@ dissolveOnDeath = function(v)
   for i = 1, #Villagers.couples do
     local c = Villagers.couples[i]
     if c.id == v.coupleId then
-      if c.conceived and (c.man == v or c.woman == v) then Villagers.failReason = "vessel" end
-      local partner = (c.man == v) and c.woman or c.man
+      if c.conceived and (c.a == v or c.b == v) then Villagers.failReason = "vessel" end
+      local partner = (c.a == v) and c.b or c.a
       if partner then
         partner.coupleId = nil
         if partner.confined then
@@ -917,6 +1151,8 @@ dissolveOnDeath = function(v)
         end
       end
       v.coupleId = nil
+      c.chosen = false
+      if Villagers.vesselId == c.id then Villagers.vesselId = nil end
       if Villagers.request == c then Villagers.request = nil end
       table.remove(Villagers.couples, i)
       return
@@ -931,13 +1167,15 @@ finishConception = function(c, ctx)
   c.conceived = true
   c.monthsLeft = vData.pregnancyMonths
   Villagers.conceived = true
-  for _, v in ipairs({ c.man, c.woman }) do
+  for _, v in ipairs({ c.a, c.b }) do
     if personAlive(v) then
       v.job, v.state, v.altar = "idle", "idle", nil
     end
   end
   ctx.waves.calendar.apocalypse = true
-  local bx, by = c.man.x, c.man.y
+  local bearer = Villagers.coupleMother(c) or c.a
+  local bx, by = ctx.village.x, ctx.village.y
+  if bearer then bx, by = bearer.x, bearer.y end
   if c.altar and c.altar <= Buildings.n then
     bx, by = Buildings.x[c.altar], Buildings.y[c.altar]
   end
@@ -952,11 +1190,11 @@ updateConceptions = function(ctx)
   for i = 1, #Villagers.couples do
     local c = Villagers.couples[i]
     if c.conceiving then
-      if personAlive(c.man) and personAlive(c.woman) then
-        if c.man.job ~= "conceive" or c.woman.job ~= "conceive" then
+      if personAlive(c.a) and personAlive(c.b) then
+        if c.a.job ~= "conceive" or c.b.job ~= "conceive" then
           c.conceiving = false
           c.altar = nil
-        elseif c.man.state == "arrived" and c.woman.state == "arrived" then
+        elseif c.a.state == "arrived" and c.b.state == "arrived" then
           finishConception(c, ctx)
         end
       end
@@ -981,21 +1219,22 @@ advanceMonths = function(n, ctx)
   local cap = ctx.buildings and ctx.buildings.popCap() or 0
   for i = 1, #Villagers.couples do
     local c = Villagers.couples[i]
-    if not c.conceiving and personAlive(c.man) and personAlive(c.woman) then
+    local mother = Villagers.coupleMother(c)
+    if not c.conceiving and personAlive(c.a) and personAlive(c.b) then
       if c.pregnant then
         c.monthsLeft = c.monthsLeft - n
         local half = math.floor((vData.pregnancyMonths or 9) / 2)
-        if c.woman and personAlive(c.woman) and c.monthsLeft <= half and not c.woman.confined then
+        if mother and personAlive(mother) and c.monthsLeft <= half and not mother.confined then
           -- second half: the mother drops everything and stays home
-          unassignBuilding(c.woman)
-          c.woman.confined = true
-          c.woman.job, c.woman.state = "home", "idle"
-          c.woman.node, c.woman.buildTarget = nil, 0
+          unassignBuilding(mother)
+          mother.confined = true
+          mother.job, mother.state = "home", "idle"
+          mother.node, mother.buildTarget = nil, 0
         end
         if c.monthsLeft <= 0 then
-          if c.woman then
-            c.woman.confined = false
-            c.woman.job, c.woman.state = "idle", "idle"
+          if mother then
+            mother.confined = false
+            mother.job, mother.state = "idle", "idle"
           end
           if c.conceived then
             c.pregnant = false
@@ -1021,7 +1260,7 @@ advanceMonths = function(n, ctx)
 end
 
 -- Rebuild villagers + couples from a save snapshot. Callbacks are preserved.
-function Villagers.load(vlist, clist, requestId, deaths, conceived, seenEpoch)
+function Villagers.load(vlist, clist, requestId, deaths, conceived, seenEpoch, mobilized, vesselId)
   Villagers.list = {}
   Villagers.couples = {}
   Villagers.request = nil
@@ -1035,10 +1274,12 @@ function Villagers.load(vlist, clist, requestId, deaths, conceived, seenEpoch)
       job = r.job, state = r.state, carry = r.carry or 0, carryRes = r.carryRes,
       node = nil, buildTarget = r.buildTarget or 0, building = r.building, altar = r.altar,
       timer = r.timer or 0, wx = r.wx or r.x, wy = r.wy or r.y,
+      ritual = r.ritual,
       flash = 0, atk = 0, dead = false, undead = r.undead or false,
-      confined = r.confined or false,
+      confined = r.confined or false, mob = r.mob,
       age = r.age or "adult", growLeft = r.growLeft or 0,
       coupleId = nil,
+      path = nil, pathI = 0, pathDone = false, pathVersion = nil, blockedTime = 0,
     }
     if r.nodeIndex and Nodes.list[r.nodeIndex] then v.node = Nodes.list[r.nodeIndex] end
     Villagers.list[idx] = v
@@ -1048,13 +1289,17 @@ function Villagers.load(vlist, clist, requestId, deaths, conceived, seenEpoch)
   nextId = maxId + 1
   local maxC = 0
   for _, cr in ipairs(clist or {}) do
+    local a = byId[cr.aId or cr.manId]
+    local b = byId[cr.bId or cr.womanId]
+    local fertile = cr.fertile
+    if fertile == nil then fertile = (a ~= nil and b ~= nil and a.sex ~= b.sex) end
     local c = {
-      id = cr.id, house = cr.house, man = byId[cr.manId], woman = byId[cr.womanId],
+      id = cr.id, house = cr.house, a = a, b = b, fertile = fertile,
       pregnant = cr.pregnant, monthsLeft = cr.monthsLeft, askIn = cr.askIn, pending = cr.pending,
       chosen = cr.chosen, conceived = cr.conceived, conceiving = cr.conceiving, altar = cr.altar,
     }
-    if c.man then c.man.coupleId = c.id end
-    if c.woman then c.woman.coupleId = c.id end
+    if c.a then c.a.coupleId = c.id end
+    if c.b then c.b.coupleId = c.id end
     Villagers.couples[#Villagers.couples + 1] = c
     if c.id > maxC then maxC = c.id end
   end
@@ -1068,12 +1313,20 @@ function Villagers.load(vlist, clist, requestId, deaths, conceived, seenEpoch)
   Villagers.conceived = conceived or false
   Villagers.failReason = nil
   Villagers.seenEpoch = seenEpoch or 0
+  Villagers.mobilized = mobilized or false
+  Villagers.vesselId = vesselId
+  if not Villagers.vesselId then
+    for _, c in ipairs(Villagers.couples) do
+      if c.chosen then Villagers.vesselId = c.id break end
+    end
+  end
   -- recompute pregnancy confinement
   local half = math.floor((vData.pregnancyMonths or 9) / 2)
   for _, c in ipairs(Villagers.couples) do
-    if c.pregnant and c.monthsLeft and c.monthsLeft <= half and c.woman then
-      c.woman.confined = true
-      c.woman.job, c.woman.state = "home", "idle"
+    local mother = Villagers.coupleMother(c)
+    if c.pregnant and c.monthsLeft and c.monthsLeft <= half and mother then
+      mother.confined = true
+      mother.job, mother.state = "home", "idle"
     end
   end
   -- rebuild researcher counts from the restored villagers

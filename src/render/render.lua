@@ -283,6 +283,8 @@ end
 function Render.villagers(S)
   local list = Villagers.list
   local sel = S.selection and S.selection.villager or nil
+  local pairA = S.pairPick and S.pairPick.a or nil
+  local pairB = S.pairPick and S.pairPick.b or nil
   love.graphics.setLineWidth(1)
   for i = 1, #list do
     local v = list[i]
@@ -290,6 +292,13 @@ function Render.villagers(S)
       local bob = math.sin(now * 6 + v.id) * 0.8
       local x, y = v.x, v.y + bob
       shadow(v.x, v.y + v.r, v.r + 1.5, v.r * 0.6)
+      local c = v.coupleId and Villagers.coupleOf(v) or nil
+      local mother = c and Villagers.coupleMother(c) or nil
+      if c and mother == v and c.conceived then
+        local pulse = 0.5 + 0.5 * math.sin(now * 6)
+        love.graphics.setColor(0.72, 0.22, 0.95, 0.30 + 0.22 * pulse)
+        love.graphics.circle("fill", x, y, v.r + 6 + pulse * 3)
+      end
       if v.undead then
         love.graphics.setColor(C.undead)
       elseif v.age == "child" then
@@ -308,6 +317,27 @@ function Render.villagers(S)
       love.graphics.circle("fill", x + v.r * 0.22, y - v.r * 0.18, es)
       love.graphics.setColor(C.villagerLine)
       love.graphics.circle("line", x, y, v.r)
+      if c and not c.fertile then
+        love.graphics.setColor(0.55, 0.75, 0.85, 0.65)
+        love.graphics.circle("line", x, y, v.r + 1.5)
+      end
+      if c and (c.chosen or Villagers.vesselId == c.id) then
+        local pulse = 0.5 + 0.5 * math.sin(now * 4 + v.id)
+        love.graphics.setColor(0.60, 0.20, 0.80, 0.45 + 0.35 * pulse)
+        love.graphics.setLineWidth(2)
+        love.graphics.circle("line", x, y, v.r + 3 + pulse * 2)
+        love.graphics.setLineWidth(1)
+      end
+      if mother == v and c.pregnant then
+        love.graphics.setColor(0.82, 0.36, 0.55, 0.95)
+        love.graphics.circle("fill", x, y + v.r * 0.45, v.r * 0.52)
+      end
+      if v == pairA or v == pairB then
+        love.graphics.setColor(0.95, 0.80, 0.25)
+        love.graphics.setLineWidth(2)
+        love.graphics.circle("line", x, y, v.r + 5)
+        love.graphics.setLineWidth(1)
+      end
       if v.carry > 0 and RES_COLOR[v.carryRes] then
         local rc = RES_COLOR[v.carryRes]
         love.graphics.setColor(rc[1], rc[2], rc[3])
