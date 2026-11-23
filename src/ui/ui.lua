@@ -18,6 +18,10 @@ local UI = {}
 -- Layout regions.
 local TOP_H = 100
 local BOTTOM_H = 138
+local ROSTER_X = 16
+local ROSTER_Y = TOP_H + 8
+local ROSTER_W = 380
+local ROSTER_ROW = 27
 
 local bigFont, medFont, smallFont, debugFont
 local buttons = {}
@@ -106,6 +110,24 @@ local function ensureCategory(S)
   S.buildCategory = nil
 end
 
+local function rosterRows()
+  local list = Villagers.roster()
+  local maxRows = math.max(0, math.floor((love.graphics.getHeight() - ROSTER_Y - BOTTOM_H - 44) / ROSTER_ROW))
+  local rows = {}
+  for i = 1, math.min(#list, maxRows) do rows[#rows + 1] = list[i] end
+  return rows, #list
+end
+
+local function rosterLabel(v)
+  local role
+  if v.undead then role = "Undead"
+  elseif v.age == "child" then role = "Child"
+  elseif v.sex == "m" then role = "Man"
+  else role = "Woman" end
+  local status = v.confined and "Confined" or Villagers.jobLabel(v)
+  return ("%s %d · %s · %d/%d"):format(role, v.id, status, math.ceil(v.hp), v.maxHp)
+end
+
 local function buildTabs(S)
   ensureCategory(S)
   local w, h = love.graphics.getWidth(), love.graphics.getHeight()
@@ -143,14 +165,41 @@ local function buildGlobals(S)
   local w, h = love.graphics.getWidth(), love.graphics.getHeight()
   local by = h - BOTTOM_H
   local gw, gap = 106, 6
+  local x = w - 12 - gw
   buttons[#buttons + 1] = {
-    x = w - 12 - gw, y = by + 8, w = gw, h = 26,
+    x = x, y = by + 8, w = gw, h = 26,
     label = "Debug [F3]", debugToggle = true, active = S.debug,
   }
+  x = x - gap - gw
   buttons[#buttons + 1] = {
-    x = w - 12 - gw - gap - gw, y = by + 8, w = gw, h = 26,
+    x = x, y = by + 8, w = gw, h = 26,
     label = "Custom [C]", checklistToggle = true, active = S.checklistVisible ~= false,
   }
+  x = x - gap - gw
+  buttons[#buttons + 1] = {
+    x = x, y = by + 8, w = gw, h = 26,
+    label = "Roster [Tab]", rosterToggle = true, active = S.rosterOpen,
+  }
+  x = x - gap - gw
+  buttons[#buttons + 1] = {
+    x = x, y = by + 8, w = gw, h = 26,
+    label = "Help [H]", helpToggle = true, active = S.helpOpen,
+  }
+end
+
+local function buildRoster(S)
+  if not S.rosterOpen then return end
+  local rows = rosterRows()
+  local y = ROSTER_Y + 34
+  for i = 1, #rows do
+    local v = rows[i]
+    buttons[#buttons + 1] = {
+      x = ROSTER_X + 8, y = y + (i - 1) * ROSTER_ROW, w = ROSTER_W - 16, h = ROSTER_ROW - 3,
+      label = rosterLabel(v),
+      rosterVillager = v,
+      active = S.selection and S.selection.villager == v,
+    }
+  end
 end
 
 local function buildActions(S)
@@ -297,6 +346,16 @@ local function buildActions(S)
     else
       actionTitle = kindLabel(kind)
     end
+    if built then
+      act("Move", { moveBuilding = bi })
+      if Buildings.hp[bi] < Buildings.maxHp[bi] then
+        local repair = Buildings.repairCost(bi)
+        act("Repair (" .. costLabel(repair) .. ")", { repairBuilding = bi }, not S.canAfford(repair))
+      end
+      act("Demolish (+" .. costLabel(Buildings.refundFor(bi)) .. ")", { demolishBuilding = bi })
+    else
+      act("Cancel construction (+" .. costLabel(Buildings.refundFor(bi)) .. ")", { demolishBuilding = bi })
+    end
   end
 end
 
@@ -307,6 +366,7 @@ function UI.buildButtons(S)
     buildPalette(S)
     buildActions(S)
     buildGlobals(S)
+    buildRoster(S)
   else
     local w, h = love.graphics.getWidth(), love.graphics.getHeight()
     buttons[#buttons + 1] = { x = w / 2 - 95, y = h / 2 + 56, w = 190, h = 44, label = "Restart [R]", action = "restart" }
@@ -330,6 +390,26 @@ function UI.handleClick(mx, my, S)
         S.checklistVisible = not (S.checklistVisible ~= false)
       elseif b.debugToggle then
         S.debug = not S.debug
+      elseif b.rosterToggle then
+        S.rosterOpen = not S.rosterOpen
+      elseif b.helpToggle then
+        S.helpOpen = true
+      elseif b.rosterVillager then
+        S.selection = { villager = b.rosterVillager }
+        S.follow = true
+        S.rosterOpen = false
+      elseif b.moveBuilding then
+        S.moveBuilding = b.moveBuilding
+        S.moveGx = Buildings.gx[b.moveBuilding]
+        S.moveGy = Buildings.gy[b.moveBuilding]
+        S.buildType = Buildings.kind[b.moveBuilding]
+        S.buildMode = true
+        S.selection = nil
+        S.follow = false
+      elseif b.repairBuilding then
+        S.repairBuilding(b.repairBuilding)
+      elseif b.demolishBuilding then
+        S.demolishBuilding(b.demolishBuilding)
       elseif b.ascend then
         Ages.ascend(S)
       elseif b.heartHeal then
@@ -569,8 +649,9 @@ local function drawTopBar(S)
   love.graphics.print(("Heart  %d / %d"):format(v.hp, v.maxHp), 22, 33)
 
   -- Resources (right)
-  local res = ("Wood %d   Food %d   Stone %d   Bones %d   Servants %d/%d")
-    :format(S.stock.wood, S.stock.food, S.stock.stone, S.stock.bone or 0, S.villagers.count(), Buildings.popCap())
+  local res = ("Wood %d   Food %d   Stone %d   Bones %d   Servants %d/%d   Idle %d")
+    :format(S.stock.wood, S.stock.food, S.stock.stone, S.stock.bone or 0,
+      S.villagers.count(), Buildings.popCap(), Villagers.idleAdults())
   love.graphics.print(res, w - 16 - debugFont:getWidth(res), 10)
 
   drawHordeTimer(S)
@@ -639,6 +720,81 @@ local function drawCommandBarBg()
   love.graphics.setFont(debugFont)
   love.graphics.setColor(0.85, 0.78, 0.95)
   love.graphics.print(actionTitle, splitX + 12, by + 24)
+end
+
+local function drawRosterPanel(S)
+  if not S.rosterOpen then return end
+  local rows, total = rosterRows()
+  local h = 36 + math.max(1, #rows) * ROSTER_ROW + 12
+  love.graphics.setColor(0.08, 0.06, 0.12, 0.94)
+  love.graphics.rectangle("fill", ROSTER_X, ROSTER_Y, ROSTER_W, h, 4)
+  love.graphics.setColor(0.55, 0.32, 0.68)
+  love.graphics.setLineWidth(1)
+  love.graphics.rectangle("line", ROSTER_X, ROSTER_Y, ROSTER_W, h, 4)
+  love.graphics.setFont(debugFont)
+  love.graphics.setColor(0.85, 0.7, 0.95)
+  love.graphics.print(("FLOCK — %d living · %d idle"):format(total, Villagers.idleAdults()), ROSTER_X + 10, ROSTER_Y + 8)
+  if #rows == 0 then
+    love.graphics.setColor(0.62, 0.55, 0.7)
+    love.graphics.print("No servants remain.", ROSTER_X + 10, ROSTER_Y + 34)
+  elseif total > #rows then
+    love.graphics.setColor(0.62, 0.55, 0.7)
+    love.graphics.print(("showing %d of %d"):format(#rows, total), ROSTER_X + 10, ROSTER_Y + h - 16)
+  end
+end
+
+local HELP_LINES = {
+  "GOAL",
+  "Grow a cult, survive the yearly hordes, and birth the Antichrist.",
+  "Gather wood, food, stone, and bones. Build houses, defenses, and research.",
+  "The horde arrives in month 12. Clear it early to reclaim the rest of the year.",
+  "",
+  "CONTROLS",
+  "Left click a servant, building, or the Heart to select it.",
+  "Right click a tree, berry bush, rock, or building to assign the selected servant.",
+  "1-9 build from the active category · B toggles build mode · Tab opens the roster.",
+  "Space summons the horde early · C customs · H help · Esc pause.",
+  "WASD or arrows pan · mouse wheel zooms · F3 debug.",
+  "",
+  "FIRST STEPS",
+  "1. Select a servant and right-click a resource node to gather.",
+  "2. Build a house before making children (Economy tab).",
+  "3. Mark two free adults as partners at a house, bind them, then Make a child.",
+  "4. Build a tower, select it, and assign crew. Only staffed towers fire.",
+  "5. Click the Heart to ascend. Complete customs and use the Altar rituals.",
+}
+
+function UI.drawHelp()
+  local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+  love.graphics.setColor(0, 0, 0, 0.76)
+  love.graphics.rectangle("fill", 0, 0, w, h)
+  local pw = math.min(720, w - 40)
+  local ph = math.min(h - 60, 44 + #HELP_LINES * 22 + 34)
+  local px, py = (w - pw) / 2, (h - ph) / 2
+  love.graphics.setColor(0.09, 0.07, 0.13, 0.98)
+  love.graphics.rectangle("fill", px, py, pw, ph, 8)
+  love.graphics.setColor(0.55, 0.32, 0.68)
+  love.graphics.setLineWidth(1)
+  love.graphics.rectangle("line", px, py, pw, ph, 8)
+  love.graphics.setFont(medFont)
+  love.graphics.setColor(0.85, 0.6, 0.95)
+  local title = "HOW TO PLAY"
+  love.graphics.print(title, px + (pw - medFont:getWidth(title)) / 2, py + 14)
+  love.graphics.setFont(debugFont)
+  local y = py + 48
+  for i = 1, #HELP_LINES do
+    local line = HELP_LINES[i]
+    if i == 1 or line == "CONTROLS" or line == "FIRST STEPS" then
+      love.graphics.setColor(0.95, 0.75, 0.55)
+    else
+      love.graphics.setColor(0.86, 0.82, 0.92)
+    end
+    love.graphics.print(line, px + 22, y)
+    y = y + 22
+  end
+  love.graphics.setColor(0.62, 0.55, 0.7)
+  local close = "H or Esc to close"
+  love.graphics.print(close, px + pw - debugFont:getWidth(close) - 18, py + ph - 22)
 end
 
 -- ---------------------------------------------------------------------------
@@ -765,6 +921,7 @@ function UI.draw(S)
   if S.mode == "playing" then
     drawTopBar(S)
     drawCommandBarBg()
+    drawRosterPanel(S)
   end
   for _, b in ipairs(bs) do
     if b.buildType then b.active = S.buildMode and S.buildType == b.buildType end

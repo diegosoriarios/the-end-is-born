@@ -19,6 +19,7 @@ local Camera = require("src.core.camera")
 local Particles = require("src.fx.particles")
 local Audio = require("src.audio.audio")
 local Persistence = require("src.core.persistence")
+local Save = require("src.core.save")
 local Render = require("src.render.render")
 local UI = require("src.ui.ui")
 local resData = require("src.data.resources")
@@ -84,6 +85,14 @@ end
 function State.reset()
   UI.load()
   State.mode = "playing"
+  State.helpOpen = false
+  State.confirm = nil
+  State.rosterOpen = false
+  State.menuNotice = nil
+  State.loadedFromBackup = false
+  State.moveBuilding = nil
+  State.moveGx = nil
+  State.moveGy = nil
   State.buildMode = false
   State.buildType = "arrow_tower"
   State.buildCategory = "defense"
@@ -228,6 +237,9 @@ function State.reset()
   elseif love.filesystem.getInfo("pair.flag") then
     State.pair = 10
     State.pairAction = 5
+  elseif love.filesystem.getInfo("ux.flag") then
+    State.ux = 10
+    State.uxAction = 6
   elseif love.filesystem.getInfo("smoke.flag") then
     State.smoke = 2600
     State.smokeAction = 2570
@@ -250,7 +262,7 @@ function State.reset()
     State.lifePhase = "setup"
     State.lifeGestate = nil
   end
-  State.harness = (State.smoke or State.stress or State.stress2 or State.test or State.life or State.menu or State.shot or State.save or State.content or State.ages or State.research or State.farm or State.grave or State.war or State.assign or State.path or State.spit or State.pair) and true or false
+  State.harness = (State.smoke or State.stress or State.stress2 or State.test or State.life or State.menu or State.shot or State.save or State.content or State.ages or State.research or State.farm or State.grave or State.war or State.assign or State.path or State.spit or State.pair or State.ux) and true or false
   State.paused = false
   State._savedYear = State.waves.calendar.year
   State._pendingSave = false
@@ -551,11 +563,22 @@ local function saveUpdate()
     local match = ok and a.buildings == b.buildings and a.wood == b.wood and a.couples == b.couples
       and a.year == b.year and a.month == b.month and a.villagers == b.villagers and a.nodes == b.nodes
       and a.bone == b.bone and crewOk and graveOk and researchOk and actorsOk and waveOk and mobOk
-    print(("[save] loaded=%s after: b=%d wood=%d bone=%d couples=%d y=%d m=%d villagers=%d nodes=%d phase=%s clock=%.1f ti=%d actors=%d/%d/%d crew=%s grave=%s research=%s actorsOk=%s waveOk=%s mobOk=%s match=%s")
+    local backupOk = false
+    if match then
+      local snap = Persistence.snapshot(State)
+      if Save.write(snap) and Save.write(snap) then
+        love.filesystem.write(Save.PATH, "{broken")
+        local recovered = Save.read()
+        backupOk = recovered ~= nil and recovered.version == snap.version
+        if backupOk then love.filesystem.write(Save.PATH, love.filesystem.read(Save.BACKUP)) end
+      end
+    end
+    match = match and backupOk
+    print(("[save] loaded=%s after: b=%d wood=%d bone=%d couples=%d y=%d m=%d villagers=%d nodes=%d phase=%s clock=%.1f ti=%d actors=%d/%d/%d crew=%s grave=%s research=%s actorsOk=%s waveOk=%s mobOk=%s backup=%s match=%s")
       :format(tostring(ok), a.buildings, a.wood, a.bone, a.couples, a.year, a.month, a.villagers,
         a.nodes, a.phase, a.clock, a.ti, a.enemies, a.projectiles, a.shots,
         tostring(crewOk), tostring(graveOk), tostring(researchOk),
-        tostring(actorsOk), tostring(waveOk), tostring(mobOk), tostring(match)))
+        tostring(actorsOk), tostring(waveOk), tostring(mobOk), tostring(backupOk), tostring(match)))
     love.event.quit()
     State.save = nil
   end
@@ -990,6 +1013,74 @@ local function pairUpdate()
   State.pair = nil
 end
 
+function State.repairBuilding(i)
+  if not i or i > Buildings.n or not Buildings.built[i] then return false end
+  local cost = Buildings.repairCost(i)
+  if not cost or not State.canAfford(cost) then return false end
+  pay(cost)
+  Buildings.hp[i] = Buildings.maxHp[i]
+  Audio.play("build_done")
+  return true
+end
+
+function State.demolishBuilding(i)
+  if not i or i > Buildings.n then return false end
+  local kind = Buildings.kind[i]
+  local built = Buildings.built[i]
+  local refund = Buildings.refundFor(i)
+  Buildings.remove(i)
+  for res, amount in pairs(refund) do
+    State.stock[res] = (State.stock[res] or 0) + amount
+  end
+  State.selection = nil
+  State.follow = false
+  Audio.play(built and "place" or "click")
+  local name = buildingData[kind] and buildingData[kind].name or kind
+  if built then
+    Checklist.notice("STRUCTURE RAZED", name .. " returns some materials")
+  else
+    Checklist.notice("CONSTRUCTION CANCELLED", name .. " materials recovered")
+  end
+  return true
+end
+
+local function uxUpdate()
+  if State.uxAction and State.ux == State.uxAction then
+    local pop = Villagers.population()
+    local startOk = pop == vData.startFamilies * 2 and pop <= Buildings.popCap()
+    local rosterOk = #Villagers.roster() == Villagers.count()
+
+    State.stock.wood, State.stock.stone = 100, 100
+    local gx, gy = Grid.worldToTile(State.village.x + 5 * Grid.TILE, State.village.y + 5 * Grid.TILE)
+    local house = Buildings.place(gx, gy, "house", true)
+    Buildings.hp[house] = 50
+    local beforeRepair = State.stock.wood
+    local repaired = State.repairBuilding(house)
+    local hpOk = Buildings.hp[house] == Buildings.maxHp[house]
+    local afterRepair = State.stock.wood
+    local mgx, mgy = Grid.worldToTile(State.village.x + 7 * Grid.TILE, State.village.y + 5 * Grid.TILE)
+    local movedOk = Buildings.move(house, mgx, mgy)
+      and Buildings.gx[house] == mgx and Buildings.gy[house] == mgy
+    local refundExpected = Buildings.refundFor(house).wood or 0
+    local demolished = State.demolishBuilding(house)
+    local refundOk = demolished and State.stock.wood == afterRepair + refundExpected
+
+    local snap = Persistence.snapshot(State)
+    local decoded = Save.decode(Save.encode(snap))
+    local saveOk = decoded ~= nil and decoded.version == snap.version
+
+    print(("[ux] start=%s(%d/%d) roster=%s repair=%s hp=%s move=%s refund=%s save=%s")
+      :format(tostring(startOk), pop, Buildings.popCap(), tostring(rosterOk),
+        tostring(repaired and beforeRepair > afterRepair), tostring(hpOk), tostring(movedOk),
+        tostring(refundOk), tostring(saveOk)))
+    State.uxAction = nil
+  end
+  if State.ux <= 0 then
+    love.event.quit()
+    State.ux = nil
+  end
+end
+
 function State.update(dt)
   if State.smoke then
     State.smoke = State.smoke - 1
@@ -1098,6 +1189,11 @@ function State.update(dt)
     pairUpdate()
     if not State.pair then return end
   end
+  if State.ux then
+    State.ux = State.ux - 1
+    uxUpdate()
+    if not State.ux or State.ux <= 0 then return end
+  end
   if State.mode ~= "playing" then return end
   local stepT0 = love.timer.getTime()
   State.hash:rebuild(Enemies)
@@ -1165,6 +1261,49 @@ function State.tryPlace(mx, my)
   if State.mode ~= "playing" or not State.buildMode then return end
   local wx, wy = Camera.toWorld(mx, my)
   local gx, gy = Grid.worldToTile(wx, wy)
+  if State.moveBuilding then
+    local i = State.moveBuilding
+    if not i or i > Buildings.n or Buildings.gx[i] ~= State.moveGx or Buildings.gy[i] ~= State.moveGy then
+      State.moveBuilding = nil
+      State.moveGx = nil
+      State.moveGy = nil
+      State.buildMode = false
+      return
+    end
+    if Buildings.canPlace(gx, gy, State.village) then
+      local d = buildingData[Buildings.kind[i]]
+      local oldx, oldy = Buildings.x[i], Buildings.y[i]
+      local oldNode = d and d.role == "farm" and Nodes.atWorld(oldx, oldy) or nil
+      if Buildings.move(i, gx, gy) then
+        if d and d.role == "farm" and d.food then
+          Nodes.removeAt(oldx, oldy)
+          local newNode = Nodes.add(d.food, Buildings.x[i], Buildings.y[i])
+          if oldNode then
+            newNode.amount = oldNode.amount
+            newNode.max = oldNode.max
+            for _, v in ipairs(Villagers.list) do
+              if v.node == oldNode then v.node = newNode end
+            end
+          end
+        end
+        for _, v in ipairs(Villagers.list) do
+          if not v.dead and v.building == i and (v.job == "crew" or v.job == "research") then
+            v.state = "walking"
+          end
+        end
+        State.moveBuilding = nil
+        State.moveGx = nil
+        State.moveGy = nil
+        State.buildMode = false
+        State.selection = { building = i }
+        State.follow = false
+        Audio.play("place")
+      end
+    else
+      Audio.play("error")
+    end
+    return
+  end
   local placed = false
   if State.buildType == "wall" then
     local d = buildingData.wall
@@ -1220,13 +1359,16 @@ function State.assignTo(v, wx, wy)
 end
 
 function State.setBuildType(t)
+  State.moveBuilding = nil
+  State.moveGx = nil
+  State.moveGy = nil
   State.buildType = t
   State.buildMode = true
 end
 
 function State.draw()
   local panned = false
-  if not State.paused then panned = Camera.updateKeyboard(1 / 60) end
+  if not State.paused and not State.helpOpen then panned = Camera.updateKeyboard(1 / 60) end
   if panned then State.follow = false end
   if State.follow and State.selection and State.selection.villager then
     local v = State.selection.villager

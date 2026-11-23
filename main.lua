@@ -8,6 +8,7 @@ local Ages = require("src.sim.ages")
 local Audio = require("src.audio.audio")
 local Settings = require("src.core.settings")
 local Menu = require("src.ui.menu")
+local UI = require("src.ui.ui")
 
 local FIXED_DT = 1 / 60
 
@@ -35,7 +36,7 @@ function love.update(dt)
       love.event.quit()
     end
   end
-  if State.mode == "menu" then return end
+  if State.mode == "menu" or State.helpOpen then return end
   if State.paused then
     State.accumulator = 0
     return
@@ -55,6 +56,7 @@ function love.draw()
   if State.mode == "menu" then
     Menu.drawTitle(State)
     if State.settingsOpen then Menu.drawSettings(State) end
+    if State.helpOpen then UI.drawHelp() end
     return
   end
   local drawT0 = love.timer.getTime()
@@ -66,24 +68,38 @@ function love.draw()
       Menu.drawPause(State)
     end
   end
+  if State.helpOpen then UI.drawHelp() end
   local now = love.timer.getTime()
   State.stats.drawMs = State.stats.drawMs * 0.95 + (now - drawT0) * 1000 * 0.05
   State.stats.frameMs = State.stats.frameMs * 0.95 + (now - (State.frameT0 or now)) * 1000 * 0.05
 end
 
 function love.keypressed(key)
+  if State.helpOpen then
+    if key == "escape" or key == "h" then State.helpOpen = false end
+    return
+  end
+  if State.confirm then
+    if key == "escape" then State.confirm = nil end
+    return
+  end
+  if key == "h" then
+    State.helpOpen = true
+    return
+  end
   if key == "escape" then
     if State.settingsOpen then
       State.settingsOpen = false
     elseif State.paused then
       State.paused = false
     elseif State.mode == "menu" then
-      love.event.quit()
+      Menu.confirm(State, "quit")
     elseif State.selection then
       State.selection = nil
       State.follow = false
     elseif State.buildMode then
       State.buildMode = false
+      State.moveBuilding = nil
     else
       State.paused = true
     end
@@ -91,7 +107,10 @@ function love.keypressed(key)
   end
   if State.mode ~= "playing" or State.paused or State.settingsOpen then return end
   if key == "r" then
-    State.reset()
+    State.paused = true
+    Menu.confirm(State, "restart")
+  elseif key == "tab" then
+    State.rosterOpen = not State.rosterOpen
   elseif key:match("^[1-9]$") then
     local idx = tonumber(key)
     local n = 0
@@ -105,6 +124,7 @@ function love.keypressed(key)
     State.checklistVisible = not State.checklistVisible
   elseif key == "b" then
     State.buildMode = not State.buildMode
+    if not State.buildMode then State.moveBuilding = nil end
   elseif key == "space" then
     State.waves:skip()
   elseif key == "f3" then
@@ -136,6 +156,10 @@ function love.keypressed(key)
 end
 
 function love.mousepressed(x, y, button)
+  if State.helpOpen then
+    State.helpOpen = false
+    return
+  end
   if State.mode == "menu" or State.paused or State.settingsOpen then
     if button == 1 then Menu.handleClick(x, y, State) end
     return
@@ -170,6 +194,7 @@ function love.mousepressed(x, y, button)
     local wx, wy = Camera.toWorld(x, y)
     if State.buildMode then
       State.buildMode = false
+      State.moveBuilding = nil
     elseif State.selection and State.selection.villager then
       -- assign the selected villager to the clicked resource/building
       if not State.assignTo(State.selection.villager, wx, wy) then

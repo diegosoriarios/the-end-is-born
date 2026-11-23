@@ -43,6 +43,7 @@ case "$1" in
   --path)    touch "$DIR/path.flag";    shift ;;
   --spit)    touch "$DIR/spit.flag";    shift ;;
   --pair)    touch "$DIR/pair.flag";    shift ;;
+  --ux)      touch "$DIR/ux.flag";      shift ;;
 esac
 
 if [ "$(uname)" = "Darwin" ] && command -v arch >/dev/null 2>&1 && arch -x86_64 /usr/bin/true 2>/dev/null; then
@@ -53,5 +54,5 @@ fi
 rc=$?
 # Harness flag files are consumed at load; remove them so the next plain run
 # starts the game normally (and the next harness gets a clean pick).
-rm -f "$DIR/smoke.flag" "$DIR/stress.flag" "$DIR/stress2.flag" "$DIR/test.flag" "$DIR/life.flag" "$DIR/menu.flag" "$DIR/shot.flag" "$DIR/save.flag" "$DIR/content.flag" "$DIR/ages.flag" "$DIR/research.flag" "$DIR/farm.flag" "$DIR/grave.flag" "$DIR/war.flag" "$DIR/assign.flag" "$DIR/path.flag" "$DIR/spit.flag" "$DIR/pair.flag"
+rm -f "$DIR/smoke.flag" "$DIR/stress.flag" "$DIR/stress2.flag" "$DIR/test.flag" "$DIR/life.flag" "$DIR/menu.flag" "$DIR/shot.flag" "$DIR/save.flag" "$DIR/content.flag" "$DIR/ages.flag" "$DIR/research.flag" "$DIR/farm.flag" "$DIR/grave.flag" "$DIR/war.flag" "$DIR/assign.flag" "$DIR/path.flag" "$DIR/spit.flag" "$DIR/pair.flag" "$DIR/ux.flag"
 exit $rc

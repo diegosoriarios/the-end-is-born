@@ -134,6 +134,15 @@ function Villagers.count()
   return c
 end
 
+function Villagers.roster()
+  local out = {}
+  local list = Villagers.list
+  for i = 1, #list do
+    if not list[i].dead then out[#out + 1] = list[i] end
+  end
+  return out
+end
+
 function Villagers.jobLabel(v)
   return JOB_LABEL[v.job] or v.job
 end

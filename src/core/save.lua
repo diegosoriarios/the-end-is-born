@@ -4,6 +4,10 @@
 local Save = {}
 
 local PATH = "save.dat"
+local BACKUP = "save.bak"
+
+Save.PATH = PATH
+Save.BACKUP = BACKUP
 
 local function esc(s)
   s = s:gsub("\\", "\\\\")
@@ -158,21 +162,41 @@ function Save.decode(str)
 end
 
 function Save.exists()
-  return love.filesystem.getInfo(PATH) ~= nil
+  return love.filesystem.getInfo(PATH) ~= nil or love.filesystem.getInfo(BACKUP) ~= nil
 end
 
 function Save.write(data)
-  return love.filesystem.write(PATH, Save.encode(data))
+  local encoded = Save.encode(data)
+  if Save.decode(encoded) == nil then return false, "encode failed" end
+  local current = love.filesystem.read(PATH)
+  if current and Save.decode(current) ~= nil then
+    local ok, err = love.filesystem.write(BACKUP, current)
+    if not ok then return false, err end
+  end
+  return love.filesystem.write(PATH, encoded)
+end
+
+function Save.readBackup()
+  Save.lastRead = nil
+  local snap = Save.decode(love.filesystem.read(BACKUP))
+  if snap then Save.lastRead = "backup" end
+  return snap
 end
 
 function Save.read()
-  local s = love.filesystem.read(PATH)
-  if not s then return nil end
-  return Save.decode(s)
+  Save.lastRead = nil
+  local current = love.filesystem.read(PATH)
+  local snap = Save.decode(current)
+  if snap then
+    Save.lastRead = "primary"
+    return snap
+  end
+  return Save.readBackup()
 end
 
 function Save.remove()
   love.filesystem.remove(PATH)
+  love.filesystem.remove(BACKUP)
 end
 
 return Save

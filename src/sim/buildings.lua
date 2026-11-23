@@ -231,6 +231,41 @@ function Buildings.upgrade(i, newKind)
   return true
 end
 
+function Buildings.move(i, gx, gy)
+  if not i or i > Buildings.n then return false end
+  local oldCell = Grid.cellIndex(Buildings.gx[i], Buildings.gy[i])
+  local newCell = Grid.cellIndex(gx, gy)
+  if oldCell == newCell then return false end
+  index[oldCell] = nil
+  Grid.occupancy[oldCell] = Grid.OCC_NONE
+  Buildings.gx[i], Buildings.gy[i] = gx, gy
+  Buildings.x[i], Buildings.y[i] = Grid.tileToWorld(gx, gy)
+  index[newCell] = i
+  Grid.occupancy[newCell] = Grid.OCC_BUILD
+  Particles.dust(Buildings.x[i], Buildings.y[i], 8)
+  changed()
+  return true
+end
+
+function Buildings.repairCost(i)
+  local missing = (Buildings.maxHp[i] or 0) - (Buildings.hp[i] or 0)
+  if missing <= 0 then return nil end
+  return { wood = math.max(1, math.ceil(missing / 40)) }
+end
+
+function Buildings.refundFor(i)
+  local d = buildingData[Buildings.kind[i]]
+  local ratio = Buildings.built[i] and 0.5 or 1
+  local refund = {}
+  if d and d.cost then
+    for res, amount in pairs(d.cost) do
+      local n = math.floor(amount * ratio)
+      if n > 0 then refund[res] = n end
+    end
+  end
+  return refund
+end
+
 function Buildings.hasBuilt(kind)
   for i = 1, Buildings.n do
     if Buildings.kind[i] == kind and Buildings.built[i] then return true end

@@ -4,7 +4,7 @@
 -- role drives sim behavior; render drives drawing. Adding a building with an
 -- existing role+render needs no code.
 return {
-  village_center = { name = "Heart", role = "heart", hp = 500, r = 48, popCap = 4, sacrificeHeal = 40 },
+  village_center = { name = "Heart", role = "heart", hp = 500, r = 48, popCap = 6, sacrificeHeal = 40 },
 
   wall = { name = "Wall", role = "wall", render = "wall", category = "defense", order = 1,
     hp = 300, cost = { wood = 5 } },

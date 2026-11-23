@@ -203,10 +203,41 @@ function Persistence.restore(S, snap)
   return true
 end
 
+function Persistence.validate(snap)
+  if type(snap) ~= "table" then return false end
+  if type(snap.version) ~= "number" or snap.version < 1 or snap.version > VERSION then return false end
+  local required = {
+    "calendar", "stock", "village", "camera", "buildings", "walls", "nodes",
+    "villagers", "couples", "enemies", "projectiles", "enemyShots", "timeline",
+    "waves", "checklist",
+  }
+  for i = 1, #required do
+    if type(snap[required[i]]) ~= "table" then return false end
+  end
+  if snap.research ~= nil and type(snap.research) ~= "table" then return false end
+  if type(snap.calendar.year) ~= "number" or type(snap.calendar.month) ~= "number" then return false end
+  if type(snap.stock.wood) ~= "number" or type(snap.stock.food) ~= "number"
+    or type(snap.stock.stone) ~= "number" then return false end
+  if type(snap.village.hp) ~= "number" or type(snap.village.maxHp) ~= "number" then return false end
+  if type(snap.camera.x) ~= "number" or type(snap.camera.y) ~= "number" or type(snap.camera.zoom) ~= "number" then return false end
+  if type(snap.waves.phase) ~= "string" or type(snap.waves.clock) ~= "number" then return false end
+  if type(snap.checklist.ids) ~= "table" then return false end
+  return true
+end
+
 function Persistence.load(S)
+  S.loadedFromBackup = false
   local snap = Save.read()
-  if not snap then return false end
-  return Persistence.restore(S, snap)
+  if not snap then return false, "unreadable" end
+  if not Persistence.validate(snap) and Save.lastRead == "primary" then
+    snap = Save.readBackup()
+  end
+  if not snap or not Persistence.validate(snap) then return false, "invalid" end
+  local ok, restored = pcall(Persistence.restore, S, snap)
+  if not ok then return false, restored end
+  if not restored then return false, "restore failed" end
+  S.loadedFromBackup = Save.lastRead == "backup"
+  return true
 end
 
 return Persistence

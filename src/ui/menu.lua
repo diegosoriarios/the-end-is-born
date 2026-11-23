@@ -35,12 +35,33 @@ local function vmenu(items)
   return btns
 end
 
+local CONFIRM_TEXT = {
+  start = "Start a new cult?\nUnsaved progress will be lost.",
+  restart = "Restart this cult?\nUnsaved progress will be lost.",
+  mainmenu = "Return to the main menu?\nUnsaved progress will be lost.",
+  quit = "Quit the game?\nUnsaved progress will be lost.",
+}
+
+function Menu.confirm(S, action)
+  S.confirm = { action = action, text = CONFIRM_TEXT[action] or "Are you sure?" }
+end
+
+local function confirmButtons(S)
+  local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+  local bw, bh = 180, 48
+  return {
+    { x = w / 2 - bw - 8, y = h / 2 + 58, w = bw, h = bh, label = "Confirm", action = "confirm" },
+    { x = w / 2 + 8, y = h / 2 + 58, w = bw, h = bh, label = "Cancel", action = "cancel" },
+  }
+end
+
 function Menu.mainButtons()
   local items = {}
   if Persistence.exists() then
     items[#items + 1] = { "Continue", "continue" }
   end
   items[#items + 1] = { "New Cult", "start" }
+  items[#items + 1] = { "How to Play", "help" }
   items[#items + 1] = { "Settings", "settings" }
   items[#items + 1] = { "Quit", "quit" }
   return vmenu(items)
@@ -50,6 +71,7 @@ function Menu.pauseButtons()
   return vmenu({
     { "Resume", "resume" },
     { "Save", "save" },
+    { "Help", "help" },
     { "Settings", "settings" },
     { "Restart", "restart" },
     { "Main Menu", "mainmenu" },
@@ -79,22 +101,60 @@ function Menu.settingsButtons()
 end
 
 function Menu.layout(S)
+  if S.confirm then return confirmButtons(S) end
   if S.settingsOpen then return Menu.settingsButtons() end
   if S.mode == "menu" then return Menu.mainButtons() end
   return Menu.pauseButtons()
 end
 
 function Menu.handleClick(mx, my, S)
+  if S.confirm then
+    for _, b in ipairs(confirmButtons(S)) do
+      if pointInRect(mx, my, b) then
+        if b.action == "confirm" then
+          local target = S.confirm.action
+          S.confirm = nil
+          if target == "start" then
+            S.reset()
+          elseif target == "restart" then
+            S.paused = false
+            S.settingsOpen = false
+            S.reset()
+          elseif target == "mainmenu" then
+            S.paused = false
+            S.settingsOpen = false
+            S.helpOpen = false
+            S.selection = nil
+            S.buildMode = false
+            S.mode = "menu"
+          elseif target == "quit" then
+            love.event.quit()
+          end
+        else
+          S.confirm = nil
+        end
+        return true
+      end
+    end
+    return true
+  end
   for _, b in ipairs(Menu.layout(S)) do
     if pointInRect(mx, my, b) then
       local a = b.action
       if a == "start" then
-        S.reset()
+        Menu.confirm(S, "start")
       elseif a == "continue" then
-        if Persistence.load(S) then
+        local ok = Persistence.load(S)
+        if ok then
           S.paused = false
           S.settingsOpen = false
           S.mode = "playing"
+          S.menuNotice = nil
+          if S.loadedFromBackup then
+            Checklist.notice("SAVE RECOVERED", "loaded the most recent backup")
+          end
+        else
+          S.menuNotice = "SAVE UNREADABLE — progress could not be loaded"
         end
       elseif a == "save" then
         if Persistence.save(S) then
@@ -102,8 +162,10 @@ function Menu.handleClick(mx, my, S)
         else
           Checklist.notice("THE RITE FAILS", "the world is not ready to be saved")
         end
+      elseif a == "help" then
+        S.helpOpen = true
       elseif a == "quit" then
-        love.event.quit()
+        Menu.confirm(S, "quit")
       elseif a == "settings" then
         S.settingsOpen = true
       elseif a == "back" then
@@ -112,13 +174,9 @@ function Menu.handleClick(mx, my, S)
         S.paused = false
         S.settingsOpen = false
       elseif a == "restart" then
-        S.paused = false
-        S.settingsOpen = false
-        S.reset()
+        Menu.confirm(S, "restart")
       elseif a == "mainmenu" then
-        S.paused = false
-        S.settingsOpen = false
-        S.mode = "menu"
+        Menu.confirm(S, "mainmenu")
       elseif a == "vol_master_down" then Settings.adjust("master", -0.1)
       elseif a == "vol_master_up" then Settings.adjust("master", 0.1)
       elseif a == "vol_sfx_down" then Settings.adjust("sfx", -0.1)
@@ -151,6 +209,31 @@ local function drawButtons(btns)
   end
 end
 
+local function drawConfirm(S)
+  if not S.confirm then return end
+  local w, h = love.graphics.getWidth(), love.graphics.getHeight()
+  love.graphics.setColor(0, 0, 0, 0.72)
+  love.graphics.rectangle("fill", 0, 0, w, h)
+  local pw, ph = 520, 230
+  local px, py = (w - pw) / 2, (h - ph) / 2
+  love.graphics.setColor(0.10, 0.08, 0.14, 0.98)
+  love.graphics.rectangle("fill", px, py, pw, ph, 8)
+  love.graphics.setColor(0.55, 0.32, 0.68)
+  love.graphics.setLineWidth(1)
+  love.graphics.rectangle("line", px, py, pw, ph, 8)
+  love.graphics.setFont(fonts.big)
+  love.graphics.setColor(0.85, 0.6, 0.95)
+  love.graphics.print("CONFIRM", px + (pw - fonts.big:getWidth("CONFIRM")) / 2, py + 22)
+  love.graphics.setFont(fonts.med)
+  love.graphics.setColor(0.9, 0.86, 0.95)
+  local lines = {}
+  for line in (S.confirm.text or ""):gmatch("[^\n]+") do lines[#lines + 1] = line end
+  for i = 1, #lines do
+    love.graphics.print(lines[i], px + (pw - fonts.med:getWidth(lines[i])) / 2, py + 92 + (i - 1) * 28)
+  end
+  drawButtons(confirmButtons(S))
+end
+
 function Menu.drawTitle(S)
   local w, h = love.graphics.getWidth(), love.graphics.getHeight()
   love.graphics.clear(0.05, 0.03, 0.07)
@@ -165,6 +248,12 @@ function Menu.drawTitle(S)
   if not S.settingsOpen then
     drawButtons(Menu.mainButtons())
   end
+  if S.menuNotice then
+    love.graphics.setFont(fonts.small)
+    love.graphics.setColor(0.95, 0.45, 0.5)
+    love.graphics.print(S.menuNotice, w / 2 - fonts.small:getWidth(S.menuNotice) / 2, h - 72)
+  end
+  drawConfirm(S)
 end
 
 function Menu.drawPause(S)
@@ -174,10 +263,11 @@ function Menu.drawPause(S)
   love.graphics.setFont(fonts.big)
   love.graphics.setColor(0.72, 0.4, 0.85)
   local t = "PAUSED"
-  love.graphics.print(t, w / 2 - fonts.big:getWidth(t) / 2, h / 2 - 150)
+  love.graphics.print(t, w / 2 - fonts.big:getWidth(t) / 2, h / 2 - 230)
   if not S.settingsOpen then
     drawButtons(Menu.pauseButtons())
   end
+  drawConfirm(S)
 end
 
 function Menu.drawSettings(S)
